@@ -37,7 +37,7 @@ const Message = packed enum(u2) {
     sever,
 };
 
-pub fn connType(comptime S: type, comptime D: type) type {
+pub fn ConnType(comptime S: type, comptime D: type) type {
     return struct {
         pub const Conn = @This();
 
@@ -47,7 +47,7 @@ pub fn connType(comptime S: type, comptime D: type) type {
         dst: *S = undefined, // used by input
         to: usize = 0,
         sin: usize = 0,
-        in: Message = .ok,
+        in: Message = undefined,
         data: D = undefined,
 
         fn set(self: *Conn, p: []S, f: usize, o: usize, t: usize, s: usize) void {
@@ -64,11 +64,11 @@ pub fn connType(comptime S: type, comptime D: type) type {
     };
 }
 
-pub fn pipeType(comptime T: type) type {
+pub fn PipeType(comptime T: type) type {
     return struct {
         pub const Stage = @This();
         pub const Data = T;
-        pub const Conn = connType(Stage, Data);
+        pub const Conn = ConnType(Stage, Data);
 
         outC: ?*Conn = null,
         inC: ?*Conn = null,
@@ -80,7 +80,7 @@ pub fn pipeType(comptime T: type) type {
         name: ?[]const u8 = null,
         label: ?[]const u8 = null,
         end: bool = false,
-        i: usize = 0,
+        i: usize = undefined,
 
         pub fn peekto(self: *Stage) !Data {
             if (debugCmd) std.log.info("peekto {*} inC {*}\n", .{ self, self.inC });
@@ -325,7 +325,7 @@ const myStages = struct {
     }
 };
 
-pub fn pipeInstance(comptime T: type, pp: anytype) type {
+pub fn PipeInstance(comptime T: type, pp: anytype) type {
 
     // build tuple of types for stage Fn and Args
     comptime var arg_set: []const type = &[_]type{};
@@ -353,10 +353,10 @@ pub fn pipeInstance(comptime T: type, pp: anytype) type {
         const pipe = pp;
 
         // stages/filter of the pipe
-        p: [pipe.len]Stage = [_]Stage{Stage{}} ** pipe.len,
+        p: [pipe.len]Stage = [_]Stage{undefined} ** pipe.len,
 
         // connection nodes
-        nodes: [pipe.len]Conn = [_]Stage.Conn{Stage.Conn{}} ** pipe.len,
+        nodes: [pipe.len]Conn = [_]Stage.Conn{undefined} ** pipe.len,
 
         pub fn args(self: *thePipe) std.meta.Tuple(arg_set) {
             var tuple: std.meta.Tuple(arg_set) = undefined;
@@ -413,12 +413,16 @@ pub fn pipeInstance(comptime T: type, pp: anytype) type {
         }
 
         // setup the pipe structs
-        pub fn setup(self: *thePipe) thePipe {
+        pub fn setup(allocator: *std.mem.Allocator) *thePipe {
+            var self: *thePipe = allocator.create(thePipe) catch {
+                unreachable;
+            };
+
             var p = self.p[0..]; // simipify life using slices
             var nodes = self.nodes[0..];
 
             inline for (pipe) |stg, i| {
-                p[i].i = i;
+                p[i] = Stage{ .i = i }; // ensure default values are set
 
                 inline for (stg) |elem, j| {
                     switch (@typeInfo(@TypeOf(elem))) {
@@ -449,7 +453,7 @@ pub fn pipeInstance(comptime T: type, pp: anytype) type {
             var map = std.hash_map.StringHashMap(Conn).init(buffalloc);
             defer map.deinit();
 
-            // create the pipe's nodes
+            // create the pipe's nodes - all fields are initialized by .set or in .run so no Conn{} is needed
             var jj: u32 = 0;
             for (p) |item, ii| {
                 var stg = false;
@@ -515,7 +519,7 @@ pub fn pipeInstance(comptime T: type, pp: anytype) type {
                 }
             }
 
-            return self.*;
+            return self;
         }
 
         // run the pipe
@@ -686,10 +690,14 @@ pub fn pipeInstance(comptime T: type, pp: anytype) type {
 }
 
 pub fn main() !void {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = &arena.allocator;
+
     x.aaa += 3;
 
     // create pipe commands and stages for type u128
-    const uP = pipeType(u128);
+    const uP = PipeType(u128);
 
     // a sample pipe using uP stages
     const pipe = .{
@@ -709,10 +717,7 @@ pub fn main() !void {
     x.aaa += 7;
 
     // create a container for this pipe with type uP
-    var myPipe = pipeInstance(uP, pipe){};
-
-    // setup the stages and node arrays for this pipe
-    _ = myPipe.setup();
+    var myPipe = PipeInstance(uP, pipe).setup(allocator);
 
     // create an args tuple for this pipe
     const myPipeArgs = myPipe.args();
