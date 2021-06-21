@@ -8,11 +8,6 @@ const debugStart = false;
 
 // will later exploit usingnamespace to allow users to add stages to library of stages
 
-pub const x = struct {
-    var xxx: u32 = 5;
-    var aaa: u32 = 100;
-};
-
 const State = packed enum(u4) {
     peekto,
     readto,
@@ -358,7 +353,7 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
         // connection nodes
         nodes: [pipe.len]Conn = [_]Stage.Conn{undefined} ** pipe.len,
 
-        pub fn args(self: *thePipe) std.meta.Tuple(arg_set) {
+        pub fn args(self: *thePipe, context: anytype) std.meta.Tuple(arg_set) {
             var tuple: std.meta.Tuple(arg_set) = undefined;
 
             // fill in the tuple
@@ -381,7 +376,7 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
                                     .Pointer => {
                                         if (debugStart) std.debug.print("Ptr {} {s}\n", .{ j, arg });
                                         comptime {
-                                            tuple[i][1][k + 1] = @field(x, arg);
+                                            tuple[i][1][k + 1] = @field(context, arg);
                                         }
                                     },
                                     // more types will be needed for depending on additional stages
@@ -414,9 +409,8 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
 
         // setup the pipe structs
         pub fn setup(allocator: *std.mem.Allocator) *thePipe {
-            var self: *thePipe = allocator.create(thePipe) catch {
+            var self: *thePipe = allocator.create(thePipe) catch 
                 unreachable;
-            };
 
             var p = self.p[0..]; // simipify life using slices
             var nodes = self.nodes[0..];
@@ -483,15 +477,13 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
                                 k.set(p, k.from, k.sout + 1, k.to, k.sin + 1);
                             }
                         }
-                        map.put(lbl, k.*) catch {
+                        map.put(lbl, k.*) catch 
                             unreachable;
-                        };
                     } else if (stg) {
                         var k = Conn{};
                         k.set(p, ii, 1, ii, 1);
-                        map.put(lbl, k) catch {
+                        map.put(lbl, k) catch 
                             unreachable;
-                        };
                     }
                 }
 
@@ -614,11 +606,11 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
                         inline while (j < p.len) : (j += 1) {
                             if (@TypeOf(tuple[j][0]) != void) { // prevent inline from generating void calls
                                 if (c.dst.i == j)
-                                    _ = @asyncCall(allocator.alignedAlloc(u8, 16, @frameSize(tuple[j][0])) catch {
-                                        unreachable;
-                                    }, &self.p[j].rc, tuple[j][0], tuple[j][1]);
+                                    _ = @asyncCall(allocator.alignedAlloc(u8, 16, @frameSize(tuple[j][0])) catch 
+                                        unreachable
+                                    , &self.p[j].rc, tuple[j][0], tuple[j][1]);
                             }
-                        }
+                        } 
                         continue :running;
                     }
 
@@ -629,9 +621,9 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
                         inline while (j < p.len) : (j += 1) {
                             if (@TypeOf(tuple[j][0]) != void) { // prevent inline from generating void calls
                                 if (c.src.i == j)
-                                    _ = @asyncCall(allocator.alignedAlloc(u8, 16, @frameSize(tuple[j][0])) catch {
-                                        unreachable;
-                                    }, &self.p[j].rc, tuple[j][0], tuple[j][1]);
+                                    _ = @asyncCall(allocator.alignedAlloc(u8, 16, @frameSize(tuple[j][0])) catch 
+                                        unreachable
+                                    , &self.p[j].rc, tuple[j][0], tuple[j][1]);
                             }
                         }
                         continue :running;
@@ -689,6 +681,20 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
     };
 }
 
+
+var xxx = 6;
+var aaa = 80;
+
+pub const x = struct {
+    var xxx: u16 = 5;
+    var aaa: u16 = 100;
+};
+
+pub const y = struct {
+    var xxx: u16 = 17;
+    var aaa: u16 = 200;
+};
+
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -697,7 +703,7 @@ pub fn main() !void {
     x.aaa += 3;
 
     // create pipe commands and stages for type u128
-    const uP = PipeType(u128);
+    const uP = PipeType(u16);
 
     // a sample pipe using uP stages
     const pipe = .{
@@ -716,11 +722,11 @@ pub fn main() !void {
     // play with a var
     x.aaa += 7;
 
-    // create a container for this pipe with type uP
+    // create a container for this pipe with type uP and setup the pipe's structure
     var myPipe = PipeInstance(uP, pipe).setup(allocator);
 
-    // create an args tuple for this pipe
-    const myPipeArgs = myPipe.args();
+    // create and fill in an args tuple for this pipe base on using context x.
+    const myPipeArgs = myPipe.args(x);
 
     // run the pipe with the above args
     try myPipe.run(myPipeArgs);
@@ -731,5 +737,16 @@ pub fn main() !void {
     x.xxx = 13;
 
     // run again with updated args
-    try myPipe.run(myPipe.args());
+    try myPipe.run(myPipe.args(x));
+    
+    std.debug.print("\n", .{});
+    
+    // and using a different context structure
+    try myPipe.run(myPipe.args(y));
+    
+    std.debug.print("\n", .{});
+    
+    // and using global context structure
+    try myPipe.run(myPipe.args(@This()));
+    
 }
