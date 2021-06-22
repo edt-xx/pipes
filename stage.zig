@@ -205,7 +205,7 @@ pub fn PipeType(comptime T: type) type {
             return;
         }
 
-        pub fn setinC(self: *Stage, i: usize) !void {
+        fn setinC(self: *Stage, i: usize) !void {
             for (self.n) |*c| {
                 if (c.dst == self and c.sin == i) {
                     self.inC = c;
@@ -225,7 +225,7 @@ pub fn PipeType(comptime T: type) type {
             return count;
         }
 
-        pub fn setoutC(self: *Stage, o: usize) !void {
+        fn setoutC(self: *Stage, o: usize) !void {
             for (self.n) |*c| {
                 if (c.src == self and c.sout == o) {
                     self.outC = c;
@@ -247,6 +247,9 @@ pub fn PipeType(comptime T: type) type {
         }
         pub fn gen(s: *Stage, d: Data) callconv(.Async) !void {
             return myStages.gen(s, d);
+        }
+        pub fn slice(s: *Stage, d:*[]Data) callconv(.Async) !void {
+            return myStages.slice(Data, s, d);
         }
     };
 }
@@ -273,6 +276,29 @@ const myStages = struct {
                 if (err != error.noOutStream) return err;
             };
             _ = try self.readto();
+        }
+    }
+    
+    fn slice(comptime T:type, self: anytype, slc:*[]T) !void {
+        defer {
+            self.endStage();
+        }
+        var input:bool = false;
+        _ = self.selectInput(0) catch |err| { if (err == error.noInStream) input = true; };
+        if (input) {
+            for (slc.*) |d| {
+                _ = try self.output(d);
+            }
+        } else {
+            var i:u32 = 0;
+            slc.len = i;
+            while (true) : (i += 1) {
+                const d = self.peekto() catch { break; };
+                slc.len = i+1;
+                slc.*[i] = d;
+                _ = try self.readto();
+            }
+            return;
         }
     }
 
@@ -375,8 +401,14 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
                                     },
                                     .Pointer => {
                                         if (debugStart) std.debug.print("Ptr {} {s}\n", .{ j, arg });
-                                        comptime {
-                                            tuple[i][1][k + 1] = @field(context, arg);
+                                            if (arg[0] == '&') {
+                                                comptime {
+                                                    tuple[i][1][k + 1] = &@field(context, arg[1..]);
+                                                }
+                                            } else {
+                                                comptime {
+                                                    tuple[i][1][k + 1] = @field(context, arg);
+                                                }
                                         }
                                     },
                                     // more types will be needed for depending on additional stages
@@ -681,13 +713,11 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
     };
 }
 
-
-var xxx = 6;
-var aaa = 80;
-
 pub const x = struct {
     var xxx: u16 = 5;
     var aaa: u16 = 100;
+    var ar = [_]u64{ 11, 22, 33, 44 };
+    var sss: []u64 = ar[0..];
 };
 
 pub const y = struct {
@@ -703,7 +733,7 @@ pub fn main() !void {
     x.aaa += 3;
 
     // create pipe commands and stages for type u128
-    const uP = PipeType(u16);
+    const uP = PipeType(u64);
 
     // a sample pipe using uP stages
     const pipe = .{
@@ -744,9 +774,26 @@ pub fn main() !void {
     // and using a different context structure
     try myPipe.run(myPipe.args(y));
     
+    const pSlicer = .{
+        .{ uP.slice, .{"&sss"} },
+        .{ uP.console, true },
+    };
+    
     std.debug.print("\n", .{});
     
-    // and using global context structure
-    try myPipe.run(myPipe.args(@This()));
+    var sPiper = PipeInstance(uP, pSlicer).setup(allocator);
+    try sPiper.run(sPiper.args(x));
     
-}
+    const pSlicew = .{
+        .{ uP.gen, .{3} },
+        .{ uP.slice, .{"&sss"}, true },
+    };
+    
+    std.debug.print("\n", .{});
+    
+    var sPipew = PipeInstance(uP, pSlicew).setup(allocator);
+    try sPipew.run(sPipew.args(x));
+    
+    try sPiper.run(sPiper.args(x));
+    
+}    
