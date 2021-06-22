@@ -237,28 +237,30 @@ pub fn PipeType(comptime T: type) type {
         }
 
         pub fn exactdiv(s: *Stage, d: Data) callconv(.Async) !void {
-            return myStages.exactdiv(s, d);
+            defer { s.endStage(); }
+            return myStages.exactdiv(Stage, Data, s, d);
         }
         pub fn console(s: *Stage) callconv(.Async) !void {
-            return myStages.console(s);
+            defer { s.endStage(); }
+            return myStages.console(Stage, s);
         }
         pub fn fanin(s: *Stage) callconv(.Async) !void {
-            return myStages.fanin(s);
+            defer { s.endStage(); }
+            return myStages.fanin(Stage, s);
         }
         pub fn gen(s: *Stage, d: Data) callconv(.Async) !void {
-            return myStages.gen(s, d);
+            defer { s.endStage(); }
+            return myStages.gen(Stage, Data, s, d);
         }
         pub fn slice(s: *Stage, d:*[]Data) callconv(.Async) !void {
-            return myStages.slice(Data, s, d);
+            defer { s.endStage(); }
+            return myStages.slice(Stage, Data, s, d);
         }
     };
 }
 
 const myStages = struct {
-    fn exactdiv(self: anytype, d: anytype) !void {
-        defer {
-            self.endStage();
-        }
+    fn exactdiv(comptime S:type, comptime D:type, self: *S, d: D) !void {
         if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
         var i: @TypeOf(self.*).Data = undefined;
         while (true) {
@@ -279,10 +281,7 @@ const myStages = struct {
         }
     }
     
-    fn slice(comptime T:type, self: anytype, slc:*[]T) !void {
-        defer {
-            self.endStage();
-        }
+    fn slice(comptime S:type, comptime D:type, self: *S, slc:*[]D) !void {
         var input:bool = false;
         _ = self.selectInput(0) catch |err| { if (err == error.noInStream) input = true; };
         if (input) {
@@ -302,10 +301,7 @@ const myStages = struct {
         }
     }
 
-    fn console(self: anytype) !void {
-        defer {
-            self.endStage();
-        }
+    fn console(comptime S:type, self: *S) !void {
         const stdout = std.io.getStdOut().writer();
         if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
         var i: @TypeOf(self.*).Data = undefined;
@@ -318,10 +314,7 @@ const myStages = struct {
         }
     }
 
-    fn fanin(self: anytype) !void {
-        defer {
-            self.endStage();
-        }
+    fn fanin(comptime S:type, self: *S) !void {
         if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
         while (true) {
             _ = self.selectAnyInput() catch |err| {
@@ -333,10 +326,7 @@ const myStages = struct {
         }
     }
 
-    fn gen(self: anytype, limit: anytype) !void {
-        defer {
-            self.endStage();
-        }
+    fn gen(comptime S:type, comptime D:type, self: *S, limit: D) !void {
         if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
         var i: @TypeOf(self.*).Data = 0;
         while (i < limit) : (i += 1) {
