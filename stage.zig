@@ -22,6 +22,7 @@ const stageError = error{
     endOfStream,
     noInStream,
     noOutStream,
+    outOfBounds,
     finished,
     active,
 };
@@ -260,6 +261,7 @@ pub fn PipeType(comptime T: type) type {
 }
 
 const myStages = struct {
+
     fn exactdiv(comptime S:type, comptime D:type, self: *S, d: D) !void {
         if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
         var i: @TypeOf(self.*).Data = undefined;
@@ -288,17 +290,19 @@ const myStages = struct {
             for (slc.*) |d| {
                 _ = try self.output(d);
             }
-        } else {
+        } else loop: {
             var i:u32 = 0;
+            const max = slc.len;    // when updating, do not exceed the initial lenght of the slice
             slc.len = i;
-            while (true) : (i += 1) {
-                const d = self.peekto() catch { break; };
+            while (i<max) : (i += 1) {
+                const d = self.peekto() catch { break :loop; };
                 slc.len = i+1;
                 slc.*[i] = d;
                 _ = try self.readto();
             }
-            return;
+            return error.outOfBounds;
         }
+        return;
     }
 
     fn console(comptime S:type, self: *S) !void {
@@ -370,9 +374,11 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
         nodes: [pipe.len]Conn = [_]Stage.Conn{undefined} ** pipe.len,
 
         pub fn args(self: *thePipe, context: anytype) std.meta.Tuple(arg_set) {
+        
+            //tuple for calling fn(s) allong with the arguement tuples reguired
             var tuple: std.meta.Tuple(arg_set) = undefined;
 
-            // fill in the tuple
+            // fill in the tuple adding the fn(s) and argument values
             inline for (pipe) |stg, i| {
                 comptime var flag: bool = true;
                 inline for (stg) |elem, j| {
@@ -385,20 +391,24 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
                         .Struct => { // struct....
                             inline for (elem) |arg, k| {
                                 switch (@typeInfo(@TypeOf(arg))) {
-                                    .Int, .ComptimeInt => {
+                                    .Int, .ComptimeInt => { // constants
                                         if (debugStart) std.debug.print("Int {} {}\n", .{ j, arg });
                                         tuple[i][1][k + 1] = arg;
                                     },
-                                    .Pointer => {
+                                    .Pointer => { // string with a var, &var, var.field or &var.field (arrays not handled yet)
                                         if (debugStart) std.debug.print("Ptr {} {s}\n", .{ j, arg });
-                                            if (arg[0] == '&') {
-                                                comptime {
-                                                    tuple[i][1][k + 1] = &@field(context, arg[1..]);
+                                        comptime {
+                                            if (std.mem.indexOfPos(u8, arg, 0, ".")) |dot| { // handle struct.field
+                                                if (arg[0] == '&') {
+                                                        tuple[i][1][k + 1] = &@field(@field(context, arg[1..dot]), arg[dot+1..]);
+                                                } else {
+                                                        tuple[i][1][k + 1] = @field(@field(context, arg[0..dot]), arg[dot+1..]); 
                                                 }
+                                            } else if (arg[0] == '&') { 
+                                                tuple[i][1][k + 1] = &@field(context, arg[1..]);
                                             } else {
-                                                comptime {
-                                                    tuple[i][1][k + 1] = @field(context, arg);
-                                                }
+                                                tuple[i][1][k + 1] = @field(context, arg);
+                                            }
                                         }
                                     },
                                     // more types will be needed for depending on additional stages
@@ -429,7 +439,7 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
             return tuple;
         }
 
-        // setup the pipe structs
+        // setup the pipe structs.  Only needs to be called once.  
         pub fn setup(allocator: *std.mem.Allocator) *thePipe {
             var self: *thePipe = allocator.create(thePipe) catch 
                 unreachable;
@@ -536,23 +546,24 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
             return self;
         }
 
-        // run the pipe
+        // run the pipe, you can repeat runs with different arg tuples (no need to rerun setup)
         pub fn run(self: *thePipe, tuple: std.meta.Tuple(arg_set)) !void {
             var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
             defer arena.deinit();
+            errdefer arena.deinit();
             const allocator = &arena.allocator;
 
             var p = self.p[0..]; // use slices
             var nodes = self.p[0].n;
 
-            // set starting input/output streams to 0
+            // set starting input/output streams to 0 & connection status to .ok
             for (nodes) |*n| {
                 if (n.sout == 0) n.src.outC = n;
                 if (n.sin == 0) n.dst.inC = n;
                 n.in = .ok;
             }
 
-            // set stages into starting State
+            // set stages to starting State
             for (p) |*s, i| {
                 if (s.name) |_| {
                     s.commit = -@intCast(isize, (i + 1));
@@ -572,6 +583,8 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
                 var temp: isize = 9999;
 
                 if (loop < 10) for (nodes) |*c, i| {
+                
+                    // dispatch a pending peekto or readto
                     if (c == c.dst.inC and (c.dst.state == .peekto or c.dst.state == .readto) and c.in != .ok and c.dst.commit == commit) {
                         if (debugLoop) {
                             if (state == 2)
@@ -586,6 +599,7 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
                         continue :running;
                     }
 
+                    // dispatch a pending anyinput
                     if (c.dst.state == .anyinput and c.in != .ok and c.in != .sever and c.dst.commit == commit) {
                         if (debugDisp) {
                             if (state == 3)
@@ -601,6 +615,7 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
                         continue :running;
                     }
 
+                    // dispatch a pending output
                     if (c == c.src.outC and c.src.state == .output and c.in != .data and c.src.commit == commit) {
                         if (debugLoop) {
                             if (state == 1)
@@ -615,12 +630,14 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
                         continue :running;
                     }
 
+                    // compete a sever after any data in the node is consumed
                     if ((c.src.outC == null and c.in == .ok) or (c.dst.inC == null and c.in == .ok)) {
                         c.in = .sever;
                         severed += 1;
                         continue :running;
                     }
 
+                    // start a stage fliter from connection destination
                     if (c.dst.state == .start and c.dst.commit == commit) {
                         c.dst.state = .run;
                         c.dst.commit = 0;
@@ -636,6 +653,7 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
                         continue :running;
                     }
 
+                    // start a stage filter from connection source
                     if (c.src.state == .start and c.src.commit == commit) {
                         c.src.state = .run;
                         c.src.commit = 0;
@@ -651,6 +669,7 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
                         continue :running;
                     }
 
+                    // track commit levels
                     if (c.dst.commit < temp) temp = c.dst.commit;
                     if (c.src.commit < temp) temp = c.src.commit;
                 };
@@ -662,7 +681,7 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
                     continue :running;
                 }
 
-                // when we use os threads in stages we will need to wait for them here.
+                // when/if we use os threads in stages we will need to wait for them here.
 
                 if (debugLoop) if (loop >= 10) {
                     std.debug.print("\nlooped {}\n", .{state});
@@ -672,6 +691,7 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
                     break :running;
                 };
 
+                // check completion and detect stalls
                 for (p) |*s| {
                     if (debugDisp) std.log.info("{s} {}", .{ s.name, s.rc });
                     if (s.rc) |_| {
@@ -703,6 +723,7 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
     };
 }
 
+// two context structs
 pub const x = struct {
     var xxx: u16 = 5;
     var aaa: u16 = 100;
@@ -712,7 +733,7 @@ pub const x = struct {
 
 pub const y = struct {
     var xxx: u16 = 17;
-    var aaa: u16 = 200;
+    var aaa: u16 = 80;
 };
 
 pub fn main() !void {
@@ -775,15 +796,18 @@ pub fn main() !void {
     try sPiper.run(sPiper.args(x));
     
     const pSlicew = .{
-        .{ uP.gen, .{3} },
+        .{ uP.gen, .{"ar.len"} },
         .{ uP.slice, .{"&sss"}, true },
     };
     
     std.debug.print("\n", .{});
     
     var sPipew = PipeInstance(uP, pSlicew).setup(allocator);
+    
+    // update the slice
     try sPipew.run(sPipew.args(x));
     
+    // output the updated slice
     try sPiper.run(sPiper.args(x));
     
 }    
