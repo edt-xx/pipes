@@ -8,7 +8,7 @@ const debugStart = false;
 
 // will later exploit usingnamespace to allow users to add stages to library of stages
 
-const State = packed enum(u4) {
+const State = enum(u4) {
     peekto,
     readto,
     output,
@@ -27,13 +27,126 @@ const stageError = error{
     active,
 };
 
-const Message = packed enum(u2) {
+const Message = enum(u2) {
     ok,
     data,
     sever,
 };
 
-pub fn ConnType(comptime S: type, comptime D: type) type {
+    // const std = @import("std");   
+    //     
+    // const ttt = .{ u8, u64, i32}; 
+    // const &[_]type{};
+    //     
+    // const eee = std.meta.Tuple(&ttt);   
+    //     
+    // fn set(tfv:*eee, v:anytype) bool {   
+    //     comptime var i = 0;   
+    //     inline while (i<tfv.*.len) : (i+=1) {   
+    //         if (@TypeOf(tfv.*[i]) == @TypeOf(v)) {   
+    //             tfv.*[i] = v;   
+    //             return true;   
+    //     }   
+    // }   
+    // return false;    
+    // }   
+    //     
+    // pub fn main() void {   
+    // var ddd:eee = undefined;  // tuple for values   
+    // var abc:i32 = -1000;   
+    //     
+    // ddd = .{ .@"0" = 200, .@"1" = 3, .@"2" = -300};   
+    // var fff = ddd;   
+    //     
+    // _ = set(&ddd,abc);   
+    //     
+    // std.debug.print("{}\n{}",.{fff, ddd});   
+    // }   
+    
+pub fn TypeUnion(comptime list: anytype) type {     // list is atuple of the types in this typeUnion
+
+    const info = @typeInfo(@TypeOf(list));          // validate list is a tuple
+    if (info != .Struct)
+            @compileError("Expected struct type");
+    if (!info.Struct.is_tuple)
+            @compileError("Struct type must be a tuple type");
+
+    // define the typedUnion's enum (ESet)
+    comptime var s=0;
+    comptime var a=0;
+    comptime var enumFields: [list.len]std.builtin.TypeInfo.EnumField = undefined;
+    comptime var decls = [_]std.builtin.TypeInfo.Declaration{};
+    inline for (list) |T, i| {
+        std.debug.assert(@TypeOf(T) == type);       // validate list entry is a type
+        enumFields[i].name = @typeName(T);
+        enumFields[i].value = i;
+        if (@sizeOf(T) > s) s = @sizeOf(T);         // track size and alignment needed to store the value
+        if (@alignOf(T) > a) a = @alignOf(T);
+    }
+    const TSet = @Type( .{ .Enum = .{               // create the enum type 
+            .layout = .Auto,
+            .tag_type = std.math.IntFittingRange(0, list.len - 1),
+            .fields = &enumFields,
+            .decls = &decls,
+            .is_exhaustive = true,
+            }
+        });
+
+    
+    return struct {
+        const TU = @This();
+        
+        // create buffer for the value with correct alignment and size for the included types
+        value: [s]u8 align(a) = [_]u8{undefined} ** s, 
+        type: TSet = undefined,                                 
+
+        // convert an ESet literal to the corresponding type (if t is runtime we get an error)
+        pub fn TypeOf(comptime e: TSet) type {
+            return list[@enumToInt(e)];
+        }
+
+        pub fn put(self:*TU, v:anytype) void {
+            inline for (list) |T, i| {
+                if (T==@TypeOf(v)) {
+                    @ptrCast(*T,&self.value).* = v; 
+                    self.type =  @intToEnum(TSet,i);
+                    return;
+                }
+            }
+            unreachable;
+        }
+
+        // return a pointer of the type of the contents of the typeUnion
+        pub fn get(self:*TU, comptime T:type) T {
+            inline for (list) |U, i| {
+                if (i == @enumToInt(self.type)) {
+                    if (T==U) 
+                        return @ptrCast(*T,&self.value).*;                    
+                    std.debug.print("ptr: Union {} expected type {} found {}\n",.{list, U, T});
+                    unreachable;                 
+                }
+            }
+            unreachable;        
+        }
+
+        // test if enum literal is in typeUnion
+        pub fn inUnion(_:TU, t:anytype) bool { 
+            inline for (std.meta.fields(TSet)) |i| {
+                if (std.mem.eql(u8,i.name,@tagName(t)))
+                    return true;
+            }
+            return false;
+        }
+
+        // check that the typeUnion value contains type
+        pub fn typeIs(self:TU, comptime T:type) bool {
+            return std.mem.eql(u8,@tagName(self.type),@typeName(T));
+        }
+
+    };
+}    
+
+pub fn ConnType(comptime S: type, comptime TU: type) type {
     return struct {
         pub const Conn = @This();
 
@@ -44,7 +157,7 @@ pub fn ConnType(comptime S: type, comptime D: type) type {
         to: usize = 0,
         sin: usize = 0,
         in: Message = undefined,
-        data: D = undefined,
+        data: TU = undefined,
 
         fn set(self: *Conn, p: []S, f: usize, o: usize, t: usize, s: usize) void {
             self.from = f;
@@ -60,10 +173,10 @@ pub fn ConnType(comptime S: type, comptime D: type) type {
     };
 }
 
-pub fn PipeType(comptime T: type) type {
+pub fn PipeType(list: anytype) type {
     return struct {
         pub const Stage = @This();
-        pub const Data = T;
+        pub const Data = TypeUnion(list);
         pub const Conn = ConnType(Stage, Data);
 
         outC: ?*Conn = null,
@@ -153,13 +266,13 @@ pub fn PipeType(comptime T: type) type {
         }
 
         pub fn severOutput(self: *Stage) !void {
-            if (self.outC) |c| {
+            if (self.outC) |_| {
                 self.outC = null;
             } else return error.noOutStream;
         }
 
         pub fn severInput(self: *Stage) !void {
-            if (self.inC) |c| {
+            if (self.inC) |_| {
                 self.inC = null;
             } else return error.noOutStream;
         }
@@ -332,8 +445,8 @@ const myStages = struct {
 
     fn gen(comptime S:type, comptime D:type, self: *S, limit: D) !void {
         if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
-        var i: @TypeOf(self.*).Data = 0;
-        while (i < limit) : (i += 1) {
+        var i: @TypeOf(self.*).Data.put(@as(u64,0);
+        while (i < limit) : (i.put(1.get(u64)+1)) {
             if (debugStages) std.log.info("gen out {}_{s} {*}", .{ self.i, self.name, self.outC });
             try self.output(i);
         }
@@ -450,7 +563,7 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
             inline for (pipe) |stg, i| {
                 p[i] = Stage{ .i = i }; // ensure default values are set
 
-                inline for (stg) |elem, j| {
+                inline for (stg) |elem | {
                     switch (@typeInfo(@TypeOf(elem))) {
                         .Fn, .BoundFn => { // fn....
                             var name = @typeName(@TypeOf(elem));
@@ -458,7 +571,7 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
                             const start = std.mem.indexOfPos(u8, name, one + @typeName(Stage).len + 1, @typeName(Stage)).?;
                             const end = std.mem.indexOfPos(u8, name, start + @typeName(Stage).len + 1, ")").?;
                             p[i].name = name[start + @typeName(Stage).len + 1 .. end];
-                            //if (debugStart) std.debug.print("stg {} {s}\n", .{i, cp[i].name});
+                            if (debugStart) std.debug.print("stg {} {s}\n", .{i, p[i].name});
                         },
                         .Pointer => { // *const u8...
                             if (debugStart) std.debug.print("label {} {s}\n", .{ i, elem });
@@ -483,18 +596,18 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
             var jj: u32 = 0;
             for (p) |item, ii| {
                 var stg = false;
-                if (p[ii].name) |_|
+                if (item.name) |_|
                     stg = true;
 
-                if (stg and !p[ii].end) {
+                if (stg and !item.end) {
                     nodes[jj].set(p, ii, 0, ii + 1, 0);
                     jj += 1;
                 }
 
-                if (p[ii].label) |lbl| {
+                if (item.label) |lbl| {
                     if (map.get(lbl)) |*k| {
                         if (!stg) {
-                            if (p[ii].end) {
+                            if (item.end) {
                                 nodes[jj - 1].set(p, ii - 1, 0, k.to, k.sin);
                                 k.set(p, k.from, k.sout, k.to, k.sin + 1);
                             } else {
@@ -503,7 +616,7 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
                                 k.set(p, k.from, k.sout + 1, k.to, k.sin);
                             }
                         } else {
-                            if (!p[ii].end) {
+                            if (!item.end) {
                                 nodes[jj].set(p, k.from, k.sout, ii, k.sin);
                                 jj += 1;
                                 k.set(p, k.from, k.sout + 1, k.to, k.sin + 1);
@@ -523,14 +636,14 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
             }
 
             // save the node slice in the stages;
-            for (p) |item, ii| {
+            for (p) | _, ii| {
                 p[ii].n = self.nodes[0..jj];
             }
 
             // debug
             if (debugStart) {
                 for (p) |s| {
-                    if (s.name) |n|
+                    if (s.name) |_|
                         std.debug.print("{} {s} {s} {} {*} {*} {*}\n", .{ s.i, s.label, s.name, s.end, s.n, s.inC, s.outC })
                     else
                         std.debug.print("{} {s} {s} {} \n", .{ s.i, s.label, s.name, s.end });
@@ -550,10 +663,9 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
         pub fn run(self: *thePipe, tuple: std.meta.Tuple(arg_set)) !void {
             var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
             defer arena.deinit();
-            errdefer arena.deinit();
             const allocator = &arena.allocator;
 
-            var p = self.p[0..]; // use slices
+            var p = self.p[0..];        // use slices
             var nodes = self.p[0].n;
 
             // set starting input/output streams to 0 & connection status to .ok
@@ -582,7 +694,7 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
             running: while (severed < nodes.len) {
                 var temp: isize = 9999;
 
-                if (loop < 10) for (nodes) |*c, i| {
+                if (loop < 10) for (nodes) |*c| {
                 
                     // dispatch a pending peekto or readto
                     if (c == c.dst.inC and (c.dst.state == .peekto or c.dst.state == .readto) and c.in != .ok and c.dst.commit == commit) {
@@ -744,7 +856,7 @@ pub fn main() !void {
     x.aaa += 3;
 
     // create pipe commands and stages for type u128
-    const uP = PipeType(u64);
+    const uP = PipeType(.{u64});
 
     // a sample pipe using uP stages
     const pipe = .{
@@ -759,7 +871,7 @@ pub fn main() !void {
         .{ uP.exactdiv, .{11} },
         .{ "b", true },
     };
-
+    
     // play with a var
     x.aaa += 7;
 
