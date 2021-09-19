@@ -62,6 +62,13 @@ const Message = enum(u2) {
     //     
     // std.debug.print("{}\n{}",.{fff, ddd});   
     // }   
+
+pub fn ReturnOf(comptime func: anytype) type {
+    return switch (@typeInfo(@TypeOf(func))) {
+        .Fn, .BoundFn => |fn_info| fn_info.return_type.?,
+        else => unreachable,
+    };
+}
     
 pub fn TypeUnion(comptime list: anytype) type {     // list is atuple of the types in this typeUnion
 
@@ -106,6 +113,11 @@ pub fn TypeUnion(comptime list: anytype) type {     // list is atuple of the typ
         }
 
         pub fn put(self:*TU, v:anytype) void {
+            if (@TypeOf(v) == TU) {
+                std.mem.copy(u8,&self.value,&v.value);
+                self.type = v.type;
+                return;
+            } 
             inline for (list) |T, i| {
                 if (T==@TypeOf(v)) {
                     @ptrCast(*T,&self.value).* = v; 
@@ -113,20 +125,22 @@ pub fn TypeUnion(comptime list: anytype) type {     // list is atuple of the typ
                     return;
                 }
             }
+            std.debug.print("put: type {} not in TypeUnion\n",.{@TypeOf(v),TU});
             unreachable;
         }
-
+        
         // return a pointer of the type of the contents of the typeUnion
         pub fn get(self:*TU, comptime T:type) T {
+            if (T == TU)
+                return self.*;
             inline for (list) |U, i| {
                 if (i == @enumToInt(self.type)) {
                     if (T==U) 
                         return @ptrCast(*T,&self.value).*;                    
-                    std.debug.print("ptr: Union {} expected type {} found {}\n",.{list, U, T});
+                    std.debug.print("get: Union {} expected type {} found {}\n",.{list, U, T});
                     unreachable;                 
                 }
-            }
-            unreachable;        
+            }       
         }
 
         // test if enum literal is in typeUnion
@@ -189,9 +203,9 @@ pub fn PipeType(list: anytype) type {
         name: ?[]const u8 = null,
         label: ?[]const u8 = null,
         end: bool = false,
-        i: usize = undefined,
+        i: usize = undefined,        
 
-        pub fn peekto(self: *Stage) !Data {
+        pub fn peekto(self: *Stage, comptime T:type) !T {
             if (debugCmd) std.log.info("peekto {*} inC {*}\n", .{ self, self.inC });
             if (self.inC) |c| {
                 if (debugCmd) std.log.info("peekto {*} in {} {}\n", .{ c, c.in, c.data });
@@ -208,7 +222,7 @@ pub fn PipeType(list: anytype) type {
             if (self.inC) |c| {
                 if (debugCmd) std.log.info("peekto {}_{s} {} in {} {}\n", .{ self.i, self.name, c.sout, c.in, c.data });
                 if (c.in == .data) {
-                    return c.data;
+                    return c.data.get(T);
                 } else {
                     return error.endOfStream;
                 }
@@ -216,7 +230,7 @@ pub fn PipeType(list: anytype) type {
             return error.noInStream;
         }
 
-        pub fn readto(self: *Stage) !Data {
+        pub fn readto(self: *Stage, comptime T: type) !T {
             if (self.inC) |c| {
                 while (c.in == .ok) {
                     suspend {
@@ -229,7 +243,7 @@ pub fn PipeType(list: anytype) type {
             if (self.inC) |c| {
                 if (c.in == .data) {
                     c.in = .ok;
-                    return c.data;
+                    return c.data.get(T);
                 } else {
                     return error.endOfStream;
                 }
@@ -237,7 +251,7 @@ pub fn PipeType(list: anytype) type {
             return error.noInStream;
         }
 
-        pub fn output(self: *Stage, v: Data) !void {
+        pub fn output(self: *Stage, v: anytype) !void {
             if (self.outC) |c| {
                 while (c.in == .data) {
                     suspend {
@@ -252,7 +266,7 @@ pub fn PipeType(list: anytype) type {
                 if (debugCmd) std.log.info("output {*} {} in {} {}\n", .{ c, c.sout, c.in, v });
                 if (c.in == .ok) {
                     c.in = .data;
-                    c.data = v;
+                    c.data.put(v);
                     return;
                 } else {
                     return error.endOfStream;
@@ -350,7 +364,7 @@ pub fn PipeType(list: anytype) type {
             return error.noOutStream;
         }
 
-        pub fn exactdiv(s: *Stage, d: Data) callconv(.Async) !void {
+        pub fn exactdiv(s: *Stage, d: u64) callconv(.Async) !void {
             defer { s.endStage(); }
             return myStages.exactdiv(Stage, Data, s, d);
         }
@@ -362,11 +376,11 @@ pub fn PipeType(list: anytype) type {
             defer { s.endStage(); }
             return myStages.fanin(Stage, s);
         }
-        pub fn gen(s: *Stage, d: Data) callconv(.Async) !void {
+        pub fn gen(s: *Stage, d: u64) callconv(.Async) !void {
             defer { s.endStage(); }
             return myStages.gen(Stage, Data, s, d);
         }
-        pub fn slice(s: *Stage, d:*[]Data) callconv(.Async) !void {
+        pub fn slice(s: *Stage, d:*[]u64) callconv(.Async) !void {
             defer { s.endStage(); }
             return myStages.slice(Stage, Data, s, d);
         }
@@ -375,12 +389,13 @@ pub fn PipeType(list: anytype) type {
 
 const myStages = struct {
 
-    fn exactdiv(comptime S:type, comptime D:type, self: *S, d: D) !void {
+    fn exactdiv(comptime S:type, comptime D:type, self: *S, d: u64) !void {
+        _ = D;
         if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
-        var i: @TypeOf(self.*).Data = undefined;
+        var i: u64 = undefined;
         while (true) {
             if (debugStages) std.log.info("div pre peek {}_{s} {*}", .{ self.i, self.name, self.outC });
-            i = try self.peekto();
+            i = try self.peekto(u64);
             //if (debugStages) std.log.info("div post peek {}_{s} {}",.{self.i, self.name, i});
             if (i % d == 0)
                 try self.selectOutput(0)
@@ -392,11 +407,12 @@ const myStages = struct {
             _ = self.output(i) catch |err| {
                 if (err != error.noOutStream) return err;
             };
-            _ = try self.readto();
+            _ = try self.readto(u64);
         }
     }
     
-    fn slice(comptime S:type, comptime D:type, self: *S, slc:*[]D) !void {
+    fn slice(comptime S:type, comptime D:type, self: *S, slc:*[]u64) !void {
+        _ = D;
         var input:bool = false;
         _ = self.selectInput(0) catch |err| { if (err == error.noInStream) input = true; };
         if (input) {
@@ -408,11 +424,11 @@ const myStages = struct {
             const max = slc.len;    // when updating, do not exceed the initial lenght of the slice
             slc.len = i;
             while (i<max) : (i += 1) {
-                const d = self.peekto() catch { break :loop; };
+                const d = self.peekto(u64) catch { break :loop; };
                 slc.len = i+1;
                 slc.*[i] = d;
-                _ = try self.readto();
-            }
+                _ = try self.readto(u64);
+            }                                            
             return error.outOfBounds;
         }
         return;
@@ -421,13 +437,13 @@ const myStages = struct {
     fn console(comptime S:type, self: *S) !void {
         const stdout = std.io.getStdOut().writer();
         if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
-        var i: @TypeOf(self.*).Data = undefined;
+        var i: u64 = undefined;
         while (true) {
             if (debugStages) std.log.info("con in {}_{s} {*}", .{ self.i, self.name, self.inC });
-            i = try self.peekto();
+            i = try self.peekto(u64);
             try stdout.print("{} ", .{i});
             _ = self.output(i) catch {};
-            _ = try self.readto();
+            _ = try self.readto(u64);
         }
     }
 
@@ -438,15 +454,17 @@ const myStages = struct {
                 if (err == error.endOfStream) continue else return err;
             };
             if (debugStages) std.log.info("fan {}_{s} {*} {*}", .{ self.i, self.name, self.inC, self.outC });
-            try self.output(try self.peekto());
-            _ = try self.readto();
+            const tmp = try self.peekto(S.Data);
+            try self.output(tmp);
+            _ = try self.readto(S.Data);
         }
     }
 
-    fn gen(comptime S:type, comptime D:type, self: *S, limit: D) !void {
+    fn gen(comptime S:type, comptime D:type, self: *S, limit: u64) !void {
+        _ = D;
         if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
-        var i: @TypeOf(self.*).Data.put(@as(u64,0);
-        while (i < limit) : (i.put(1.get(u64)+1)) {
+        var i:u64 = 0;
+        while (i < limit) : (i += 1) {
             if (debugStages) std.log.info("gen out {}_{s} {*}", .{ self.i, self.name, self.outC });
             try self.output(i);
         }
@@ -457,11 +475,33 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
 
     // build tuple of types for stage Fn and Args
     comptime var arg_set: []const type = &[_]type{};
-
+    
+    comptime var labels:std.meta.Tuple(                     // list of enum literals for labels
+        list: {
+            comptime var l: []const type = &[_]type {};
+            inline for (pp) |stg| {
+                if (@typeInfo(@TypeOf(stg[0])) == .EnumLiteral and stg.len>1 and @typeInfo(@TypeOf(stg[1])) != .EnumLiteral)
+                    l = l ++ &[_]type{@TypeOf(stg[0])};
+            }
+            break :list l;
+        } ) = undefined;
+    comptime var defn:[labels.len]u8 = undefined;           // stage the label is defined by
+    {   
+        comptime var j = 0;
+        inline for (pp) |stg, i| {
+            if (@typeInfo(@TypeOf(stg[0])) == .EnumLiteral and stg.len>1 and @typeInfo(@TypeOf(stg[1])) != .EnumLiteral) {
+                labels[j] = stg[0];
+                defn[j] = i;
+                j += 1;
+            }
+        }
+    }
+   
     inline for (pp) |stg, i| {
         comptime var flag: bool = true;
         inline for (stg) |elem| {
-            switch (@typeInfo(@TypeOf(elem))) {
+            const E = @typeInfo(@TypeOf(elem));           
+            switch (E) {
                 .Fn, .BoundFn => {
                     if (debugStart) std.debug.print("fn {} {}\n", .{ i, elem });
                     arg_set = arg_set ++ &[_]type{std.meta.Tuple(&[_]type{ @TypeOf(elem), std.meta.ArgsTuple(@TypeOf(elem)) })};
@@ -473,12 +513,13 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
         if (flag)
             arg_set = arg_set ++ &[_]type{std.meta.Tuple(&[_]type{void})};
     }
+    
 
     return struct {
-        const Stage = T;
-        const Conn = Stage.Conn;
-        const thePipe = @This();
-        const pipe = pp;
+        const Stage = T;            // the PipeType
+        const Conn = Stage.Conn;    // list of connections
+        const thePipe = @This();    // the pipeInstance
+        const pipe = pp;            // the pipe source tuple
 
         // stages/filter of the pipe
         p: [pipe.len]Stage = [_]Stage{undefined} ** pipe.len,
@@ -563,7 +604,7 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
             inline for (pipe) |stg, i| {
                 p[i] = Stage{ .i = i }; // ensure default values are set
 
-                inline for (stg) |elem | {
+                inline for (stg) |elem, j | {
                     switch (@typeInfo(@TypeOf(elem))) {
                         .Fn, .BoundFn => { // fn....
                             var name = @typeName(@TypeOf(elem));
@@ -573,13 +614,19 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
                             p[i].name = name[start + @typeName(Stage).len + 1 .. end];
                             if (debugStart) std.debug.print("stg {} {s}\n", .{i, p[i].name});
                         },
-                        .Pointer => { // *const u8...
-                            if (debugStart) std.debug.print("label {} {s}\n", .{ i, elem });
-                            p[i].label = elem;
-                        },
-                        .Bool => { // bool...
-                            if (debugStart) std.debug.print("end {}\n", .{i});
-                            p[i].end = true;
+                        //.Pointer => { // *const u8...
+                        //    if (debugStart) std.debug.print("label {} {s}\n", .{ i, elem });
+                        //    p[i].label = elem;
+                        //},
+                        .EnumLiteral => { // label (.any) or end (._)
+                            if (j == 0) {
+                                p[i].label = @tagName(elem);
+                                if (debugStart) std.debug.print("label {} {s}\n", .{ i, elem });
+                            } else {
+                                p[i].end = true;
+                                if (debugStart) std.debug.print("end {}\n", .{i});
+                            }
+                            
                         },
                         else => {},
                     }
@@ -861,15 +908,15 @@ pub fn main() !void {
     // a sample pipe using uP stages
     const pipe = .{
         .{ uP.gen, .{"aaa"} },
-        .{ "a", uP.exactdiv, .{"xxx"} },
-        .{ "b", uP.fanin },
-        .{ uP.console, true },
-        .{"a"},
-        .{ "c", uP.exactdiv, .{7} },
-        .{ "b", true },
-        .{"c"},
-        .{ uP.exactdiv, .{11} },
-        .{ "b", true },
+        .{ .a, uP.exactdiv, .{"xxx"}},
+        .{ .b, uP.fanin },
+        .{ uP.console, ._ },
+        .{ .a },
+        .{ .c, uP.exactdiv, .{7}},
+        .{ .b, ._ },
+        .{ .c },
+        .{ uP.exactdiv, .{11}},
+        .{ .b, ._ },
     };
     
     // play with a var
@@ -899,7 +946,7 @@ pub fn main() !void {
     
     const pSlicer = .{
         .{ uP.slice, .{"&sss"} },
-        .{ uP.console, true },
+        .{ uP.console, ._ },
     };
     
     std.debug.print("\n", .{});
@@ -909,7 +956,7 @@ pub fn main() !void {
     
     const pSlicew = .{
         .{ uP.gen, .{"ar.len"} },
-        .{ uP.slice, .{"&sss"}, true },
+        .{ uP.slice, .{"&sss"}, ._ },
     };
     
     std.debug.print("\n", .{});
