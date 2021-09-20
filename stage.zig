@@ -125,7 +125,7 @@ pub fn TypeUnion(comptime list: anytype) type {     // list is atuple of the typ
                     return;
                 }
             }
-            std.debug.print("put: type {} not in TypeUnion\n",.{@TypeOf(v),TU});
+            std.debug.print("put: type {} not in TypeUnion {}\n",.{@TypeOf(v),TU});
             unreachable;
         }
         
