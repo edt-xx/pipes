@@ -90,26 +90,31 @@ pub fn TypeUnion(comptime list: anytype) type {     // list is atuple of the typ
         if (@sizeOf(T) > s) s = @sizeOf(T);         // track size and alignment needed to store the value
         if (@alignOf(T) > a) a = @alignOf(T);
     }
+    
     const TSet = @Type( .{ .Enum = .{               // create the enum type 
             .layout = .Auto,
-            .tag_type = std.math.IntFittingRange(0, list.len - 1),
+            .tag_type = std.math.IntFittingRange(0, list.len-1),
             .fields = &enumFields,
             .decls = &decls,
             .is_exhaustive = true,
             }
         });
-
     
     return struct {
         const TU = @This();
+        const E = TSet;
         
         // create buffer for the value with correct alignment and size for the included types
         value: [s]u8 align(a) = [_]u8{undefined} ** s, 
-        type: TSet = undefined,                                 
+        type: TSet = undefined,      
 
         // convert an ESet literal to the corresponding type (if t is runtime we get an error)
         pub fn TypeOf(comptime e: TSet) type {
             return list[@enumToInt(e)];
+        }
+        
+        pub fn getType(self:*TU) @TypeOf(._) {
+            return self.type;
         }
 
         pub fn put(self:*TU, v:anytype) void {
@@ -140,13 +145,14 @@ pub fn TypeUnion(comptime list: anytype) type {     // list is atuple of the typ
                     std.debug.print("get: Union {} expected type {} found {}\n",.{list, U, T});
                     unreachable;                 
                 }
-            }       
+            } 
+            unreachable;
         }
 
-        // test if enum literal is in typeUnion
-        pub fn inUnion(_:TU, t:anytype) bool { 
-            inline for (std.meta.fields(TSet)) |i| {
-                if (std.mem.eql(u8,i.name,@tagName(t)))
+        // test if type is in typeUnion
+        pub fn inUnion(comptime T:type) bool { 
+            inline for (list) |U| {
+                if (T == U)
                     return true;
             }
             return false;
@@ -154,7 +160,13 @@ pub fn TypeUnion(comptime list: anytype) type {     // list is atuple of the typ
 
         // check that the typeUnion value contains type
         pub fn typeIs(self:TU, comptime T:type) bool {
-            return std.mem.eql(u8,@tagName(self.type),@typeName(T));
+            inline for (list) |U, i| {
+                if (i == @enumToInt(self.type)) {
+                    if (T==U)
+                        return true;
+                }
+            }
+            return false;
         }
 
     };
@@ -187,11 +199,12 @@ pub fn ConnType(comptime S: type, comptime TU: type) type {
     };
 }
 
-pub fn PipeType(list: anytype) type {
+pub fn StageType(list: anytype) type {
+
     return struct {
         pub const Stage = @This();
-        pub const Data = TypeUnion(list);
-        pub const Conn = ConnType(Stage, Data);
+        pub const TU = TypeUnion(list);
+        pub const Conn = ConnType(Stage, TU);
 
         outC: ?*Conn = null,
         inC: ?*Conn = null,
@@ -204,7 +217,7 @@ pub fn PipeType(list: anytype) type {
         label: ?[]const u8 = null,
         end: bool = false,
         i: usize = undefined,        
-
+        
         pub fn peekto(self: *Stage, comptime T:type) !T {
             if (debugCmd) std.log.info("peekto {*} inC {*}\n", .{ self, self.inC });
             if (self.inC) |c| {
@@ -363,113 +376,104 @@ pub fn PipeType(list: anytype) type {
             self.outC = null;
             return error.noOutStream;
         }
-
-        pub fn exactdiv(s: *Stage, d: u64) callconv(.Async) !void {
-            defer { s.endStage(); }
-            return myStages.exactdiv(Stage, Data, s, d);
-        }
-        pub fn console(s: *Stage) callconv(.Async) !void {
-            defer { s.endStage(); }
-            return myStages.console(Stage, s);
-        }
-        pub fn fanin(s: *Stage) callconv(.Async) !void {
-            defer { s.endStage(); }
-            return myStages.fanin(Stage, s);
-        }
-        pub fn gen(s: *Stage, d: u64) callconv(.Async) !void {
-            defer { s.endStage(); }
-            return myStages.gen(Stage, Data, s, d);
-        }
-        pub fn slice(s: *Stage, d:*[]u64) callconv(.Async) !void {
-            defer { s.endStage(); }
-            return myStages.slice(Stage, Data, s, d);
-        }
+    
     };
 }
 
-const myStages = struct {
+pub fn Filters(comptime Stage:type, comptime T:type) type {
 
-    fn exactdiv(comptime S:type, comptime D:type, self: *S, d: u64) !void {
-        _ = D;
-        if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
-        var i: u64 = undefined;
-        while (true) {
-            if (debugStages) std.log.info("div pre peek {}_{s} {*}", .{ self.i, self.name, self.outC });
-            i = try self.peekto(u64);
-            //if (debugStages) std.log.info("div post peek {}_{s} {}",.{self.i, self.name, i});
-            if (i % d == 0)
-                try self.selectOutput(0)
-            else
-                self.selectOutput(1) catch |err| {
+    std.debug.assert(Stage.TU.inUnion(T)); 
+    
+    return struct {
+    
+        const S = Stage; 
+        
+        fn exactdiv(self:*S, d: T) callconv(.Async) !void {
+            defer { self.endStage(); }
+            if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
+            while (true) {
+                if (debugStages) std.log.info("div pre peek {}_{s} {*}", .{ self.i, self.name, self.outC });
+                var i = try self.peekto(u64);
+                //if (debugStages) std.log.info("div post peek {}_{s} {}",.{self.i, self.name, i});
+                if (i % d == 0)
+                    try self.selectOutput(0)
+                else
+                    self.selectOutput(1) catch |err| {
+                        if (err != error.noOutStream) return err;
+                    };
+                if (debugStages) std.log.info("div out {}_{s} {*}", .{ self.i, self.name, self.outC });
+                _ = self.output(i) catch |err| {
                     if (err != error.noOutStream) return err;
                 };
-            if (debugStages) std.log.info("div out {}_{s} {*}", .{ self.i, self.name, self.outC });
-            _ = self.output(i) catch |err| {
-                if (err != error.noOutStream) return err;
-            };
-            _ = try self.readto(u64);
-        }
-    }
-    
-    fn slice(comptime S:type, comptime D:type, self: *S, slc:*[]u64) !void {
-        _ = D;
-        var input:bool = false;
-        _ = self.selectInput(0) catch |err| { if (err == error.noInStream) input = true; };
-        if (input) {
-            for (slc.*) |d| {
-                _ = try self.output(d);
-            }
-        } else loop: {
-            var i:u32 = 0;
-            const max = slc.len;    // when updating, do not exceed the initial lenght of the slice
-            slc.len = i;
-            while (i<max) : (i += 1) {
-                const d = self.peekto(u64) catch { break :loop; };
-                slc.len = i+1;
-                slc.*[i] = d;
                 _ = try self.readto(u64);
-            }                                            
-            return error.outOfBounds;
+            }
         }
-        return;
-    }
+        
+        fn slice(self:*S, slc:*[]T) callconv(.Async) !void {
+            defer { self.endStage(); }
+            var input:bool = false;
+            _ = self.selectInput(0) catch |err| { if (err == error.noInStream) input = true; };
+            if (input) {
+                for (slc.*) |d| {
+                    _ = try self.output(d);
+                }
+            } else loop: {
+                var i:u32 = 0;
+                const max = slc.len;    // when updating, do not exceed the initial lenght of the slice
+                slc.len = i;
+                while (i<max) : (i += 1) {
+                    const d = self.peekto(T) catch { break :loop; };
+                    slc.len = i+1;
+                    slc.*[i] = d;
+                    _ = try self.readto(T);
+                }                                            
+                return error.outOfBounds;
+            }
+            return;
+        }
 
-    fn console(comptime S:type, self: *S) !void {
-        const stdout = std.io.getStdOut().writer();
-        if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
-        var i: u64 = undefined;
-        while (true) {
-            if (debugStages) std.log.info("con in {}_{s} {*}", .{ self.i, self.name, self.inC });
-            i = try self.peekto(u64);
-            try stdout.print("{} ", .{i});
-            _ = self.output(i) catch {};
-            _ = try self.readto(u64);
+        fn console(self:*S) callconv(.Async) !void {
+            defer { self.endStage(); }
+            const stdout = std.io.getStdOut().writer();
+            if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
+            
+            while (true) {
+                if (debugStages) std.log.info("con in {}_{s} {*}", .{ self.i, self.name, self.inC });
+                var e = try self.peekto(T);
+                try stdout.print(" {}", .{e});
+                _ = self.output(e) catch {};
+                _ = try self.readto(T);
+            }
         }
-    }
 
-    fn fanin(comptime S:type, self: *S) !void {
-        if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
-        while (true) {
-            _ = self.selectAnyInput() catch |err| {
-                if (err == error.endOfStream) continue else return err;
-            };
-            if (debugStages) std.log.info("fan {}_{s} {*} {*}", .{ self.i, self.name, self.inC, self.outC });
-            const tmp = try self.peekto(S.Data);
-            try self.output(tmp);
-            _ = try self.readto(S.Data);
+        fn fanin(self:*S) callconv(.Async) !void {
+            defer { self.endStage(); }
+            if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
+            while (true) {
+                _ = self.selectAnyInput() catch |err| {
+                    if (err == error.endOfStream) continue else return err;
+                };
+                if (debugStages) std.log.info("fan {}_{s} {*} {*}", .{ self.i, self.name, self.inC, self.outC });
+                const tmp = try self.peekto(S.TU);
+                try self.output(tmp);
+                _ = try self.readto(S.TU);
+            }
         }
-    }
 
-    fn gen(comptime S:type, comptime D:type, self: *S, limit: u64) !void {
-        _ = D;
-        if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
-        var i:u64 = 0;
-        while (i < limit) : (i += 1) {
-            if (debugStages) std.log.info("gen out {}_{s} {*}", .{ self.i, self.name, self.outC });
-            try self.output(i);
+        fn gen(self:*S, limit: T) callconv(.Async) !void {
+            defer { self.endStage(); }
+            if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
+            var i:u64 = 0;
+            while (i < limit) : (i += 1) {
+                if (debugStages) std.log.info("gen out {}_{s} {*}", .{ self.i, self.name, self.outC });
+                try self.output(i);
+            }
         }
-    }
-};
+    
+    };
+}
+            
+
 
 pub fn PipeInstance(comptime T: type, pp: anytype) type {
 
@@ -485,7 +489,7 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
             }
             break :list l;
         } ) = undefined;
-    comptime var defn:[labels.len]u8 = undefined;           // stage the label is defined by
+    comptime var defn:[labels.len]u8 = undefined;           // stage the label is defined in
     {   
         comptime var j = 0;
         inline for (pp) |stg, i| {
@@ -516,7 +520,7 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
     
 
     return struct {
-        const Stage = T;            // the PipeType
+        const Stage = T;            // the StageType
         const Conn = Stage.Conn;    // list of connections
         const thePipe = @This();    // the pipeInstance
         const pipe = pp;            // the pipe source tuple
@@ -623,8 +627,13 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
                                 p[i].label = @tagName(elem);
                                 if (debugStart) std.debug.print("label {} {s}\n", .{ i, elem });
                             } else {
-                                p[i].end = true;
-                                if (debugStart) std.debug.print("end {}\n", .{i});
+                                if (elem == ._) {
+                                    p[i].end = true;
+                                    if (debugStart) std.debug.print("end {}\n", .{i});
+                                } else {
+                                    std.debug.print("expected ._ found: {}\n",.{stg});
+                                    unreachable;
+                                }
                             }
                             
                         },
@@ -903,19 +912,20 @@ pub fn main() !void {
     x.aaa += 3;
 
     // create pipe commands and stages for type u128
-    const uP = PipeType(.{u64});
+    const uP = StageType(.{u64, u32});
+    const f = Filters(uP,u64);
 
     // a sample pipe using uP stages
     const pipe = .{
-        .{ uP.gen, .{"aaa"} },
-        .{ .a, uP.exactdiv, .{"xxx"}},
-        .{ .b, uP.fanin },
-        .{ uP.console, ._ },
+        .{ f.gen, .{"aaa"} },
+        .{ .a, f.exactdiv, .{"xxx"}},
+        .{ .b, f.fanin },
+        .{ f.console, ._ },
         .{ .a },
-        .{ .c, uP.exactdiv, .{7}},
+        .{ .c, f.exactdiv, .{7}},
         .{ .b, ._ },
         .{ .c },
-        .{ uP.exactdiv, .{11}},
+        .{ f.exactdiv, .{11}},
         .{ .b, ._ },
     };
     
@@ -923,7 +933,7 @@ pub fn main() !void {
     x.aaa += 7;
 
     // create a container for this pipe with type uP and setup the pipe's structure
-    var myPipe = PipeInstance(uP, pipe).setup(allocator);
+    var myPipe = PipeInstance(f.S, pipe).setup(allocator);
 
     // create and fill in an args tuple for this pipe base on using context x.
     const myPipeArgs = myPipe.args(x);
@@ -945,8 +955,8 @@ pub fn main() !void {
     try myPipe.run(myPipe.args(y));
     
     const pSlicer = .{
-        .{ uP.slice, .{"&sss"} },
-        .{ uP.console, ._ },
+        .{ f.slice, .{"&sss"} },
+        .{ f.console, ._ },
     };
     
     std.debug.print("\n", .{});
@@ -955,8 +965,8 @@ pub fn main() !void {
     try sPiper.run(sPiper.args(x));
     
     const pSlicew = .{
-        .{ uP.gen, .{"ar.len"} },
-        .{ uP.slice, .{"&sss"}, ._ },
+        .{ f.gen, .{"ar.len"} },
+        .{ f.slice, .{"&sss"}, ._ },
     };
     
     std.debug.print("\n", .{});
