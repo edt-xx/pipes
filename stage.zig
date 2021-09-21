@@ -41,8 +41,8 @@ const Message = enum(u2) {
 // }
     
 // we use TypeUnion to store the values passed between stages.  We define the StageType by passing a tuple of types with
-// the types valid to use for the StageType.  We use Filters to create non generic versions of the filter functions with
-// specific types, validating that the types are valid for the StageType.
+// the types valid to use in the pipe's TypeUnion(s).  We use Filters to create non generic versions of the filter functions 
+// with specific types, validating that the types are valid for the StageType.
     
 pub fn TypeUnion(comptime list: anytype) type {     // list is atuple of the types in this typeUnion
 
@@ -76,7 +76,6 @@ pub fn TypeUnion(comptime list: anytype) type {     // list is atuple of the typ
     
     return struct {
         const TU = @This();
-        const E = TSet;
         
         // create buffer for the value with correct alignment and size for the included types
         value: [s]u8 align(a) = [_]u8{undefined} ** s, 
@@ -108,7 +107,7 @@ pub fn TypeUnion(comptime list: anytype) type {     // list is atuple of the typ
             unreachable;
         }
         
-        // return a pointer of the type of the contents of the typeUnion
+        // return the value of typeUnion - validate that stored and requested types match.
         pub fn get(self:*TU, comptime T:type) T {
             if (T == TU)
                 return self.*;
@@ -120,7 +119,7 @@ pub fn TypeUnion(comptime list: anytype) type {     // list is atuple of the typ
                     unreachable;                 
                 }
             } 
-            unreachable;
+            unreachable;    // not initialized
         }
 
         // test if type is in typeUnion
@@ -132,7 +131,7 @@ pub fn TypeUnion(comptime list: anytype) type {     // list is atuple of the typ
             return false;
         }
 
-        // check that the typeUnion value contains type
+        // check if the typeUnion contains a value of type
         pub fn typeIs(self:TU, comptime T:type) bool {
             inline for (list) |U, i| {
                 if (i == @enumToInt(self.type)) {
@@ -149,7 +148,9 @@ pub fn TypeUnion(comptime list: anytype) type {     // list is atuple of the typ
 // This is used to define the connections between stages (and pipes)
 
 pub fn ConnType(comptime S: type, comptime TU: type) type {
+
     return struct {
+    
         pub const Conn = @This();
 
         src: *S = undefined, // used by output
@@ -175,11 +176,13 @@ pub fn ConnType(comptime S: type, comptime TU: type) type {
     };
 }
 
-// used to create a type for stages that can be used with any of the types in the list, which needs to be a tuple of types.
+// Used to create a type for stages that can be used with any of the types in the list, which needs to be a tuple of types.
+// A stage is defined as a filter, its args and connections
 
 pub fn StageType(list: anytype) type {
 
     return struct {
+    
         pub const Stage = @This();
         pub const TU = TypeUnion(list);
         pub const Conn = ConnType(Stage, TU);
@@ -204,13 +207,11 @@ pub fn StageType(list: anytype) type {
             if (self.inC) |c| {
                 if (debugCmd) std.log.info("peekto {*} in {} {}\n", .{ c, c.in, c.data });
                 while (c.in == .ok) {
-                    //std.log.info("while suspended",.{});
                     suspend {
                         self.state = .peekto;
                         self.frame = @frame();
                     }
                 }
-                //std.log.info("while exited",.{});
             }
             self.state = .done;
             if (self.inC) |c| {
@@ -361,9 +362,9 @@ pub fn StageType(list: anytype) type {
     };
 }
 
-// using std.meta.args.Tuple implies that no filter can use generic functions.  We do not have to have there functions in
-// StageType since we generate the args for the functions in PipeInstance.args and can set the first arg to the StageType 
-// used by the pipe.  This can be done explicitly or via the generated type from Filters.
+// using std.meta.args.Tuple implies that no filter can use generic functions.  We use Filter to generate filter functions
+// that are not generic.  We do not have the functions in StageType since we generate the args for the functions via
+// PipeInstance.args and can set the first arg of the non generic filter function to the StageType used by the pipe.  
 
 pub fn Filters(comptime Stage:type, comptime T:type) type {
 
@@ -470,37 +471,41 @@ pub fn Filters(comptime Stage:type, comptime T:type) type {
     };
 }
             
-// Once we have defined the StageType, Filters, we need to create a take a pipe tuple and setup to run it using a 
-// PipeInstance.  The PipeInstances is used to set the args for a pipe using struct entires, the any required args 
-// are set the run funcion should be called to execute the pipe.
+// Once we have defined the StageType & Filters types, we need to use a pipe tuple and prepare to run it using a 
+// PipeInstance.  The PipeInstances is used to set the args for a pipe using struct(s) as context blocks.  Any required 
+// args are set, the run funcion should be called to execute the pipe.
 
 pub fn PipeInstance(comptime T: type, pp: anytype) type {
 
     // build tuple of types for stage Fn and Args
     comptime var arg_set: []const type = &[_]type{};
     
-    comptime var labels:std.meta.Tuple(                     // list of enum literals for labels
+    comptime var labels:std.meta.Tuple(                     // list of enum literals type for labels
         list: {
             comptime var l: []const type = &[_]type {};
             inline for (pp) |stg| {
                 if (@typeInfo(@TypeOf(stg[0])) == .EnumLiteral and stg.len>1 and @typeInfo(@TypeOf(stg[1])) != .EnumLiteral)
                     l = l ++ &[_]type{@TypeOf(stg[0])};
             }
-            break :list l;
+            break :list l;                                  // return tuple of enum literal types, to create labels tuple
         } ) = undefined;
     comptime var defn:[labels.len]u8 = undefined;           // stage the label is defined in
+    comptime var lmap = [_]bool{false} ** pp.len;           // stage starts with a label
     {   
-        comptime var j = 0;
+        comptime var j = 0;                                 // save enum literals in the labels tuple
         inline for (pp) |stg, i| {
-            if (@typeInfo(@TypeOf(stg[0])) == .EnumLiteral and stg.len>1 and @typeInfo(@TypeOf(stg[1])) != .EnumLiteral) {
-                labels[j] = stg[0];
-                defn[j] = i;
-                j += 1;
+            if (@typeInfo(@TypeOf(stg[0])) == .EnumLiteral and stg[0] != ._) {
+                lmap[i] = true;
+                if (stg.len>1 and @typeInfo(@TypeOf(stg[1])) != .EnumLiteral) {
+                    labels[j] = stg[0];
+                    defn[j] = i;
+                    j += 1;
+                }
             }
-        }
-    }
+        }                                                   // *** should compute the number of nodes here too
+    }                                                       // *** node array cannot be comptime (connections are dynamic)
    
-    inline for (pp) |stg, i| {
+    inline for (pp) |stg, i| {                              // create the args_set tuple for args function
         comptime var flag: bool = true;
         inline for (stg) |elem| {
             const E = @typeInfo(@TypeOf(elem));           
@@ -530,14 +535,14 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
         // connection nodes
         nodes: [pipe.len]Conn = [_]Stage.Conn{undefined} ** pipe.len,
         
-// associate the args with the stage's filters and a context struct.
+// associate the args with the stage's filters and a context struct.  Returns an arg_tuple
 
         pub fn args(self: *thePipe, context: anytype) std.meta.Tuple(arg_set) {
         
             //tuple for calling fn(s) allong with the arguement tuples reguired
             var tuple: std.meta.Tuple(arg_set) = undefined;
 
-            // fill in the tuple adding the fn(s) and argument values
+            // fill in the tuple adding the fn(s) and argument values, using the passed contect structure block
             inline for (pipe) |stg, i| {
                 comptime var flag: bool = true;
                 inline for (stg) |elem, j| {
@@ -554,23 +559,23 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
                                         if (debugStart) std.debug.print("Int {} {}\n", .{ j, arg });
                                         tuple[i][1][k + 1] = arg;
                                     },
-                                    .Pointer => { // string with a var, &var, var.field or &var.field (arrays not handled yet)
+                                    .Pointer => { // string with a var, &var, var.field or &var.field (use a slice, not an array)
                                         if (debugStart) std.debug.print("Ptr {} {s}\n", .{ j, arg });
                                         comptime {
-                                            if (std.mem.indexOfPos(u8, arg, 0, ".")) |dot| { // handle struct.field
+                                            if (std.mem.indexOfPos(u8, arg, 0, ".")) |dot| { // handle single level struct.field
                                                 if (arg[0] == '&') {
-                                                        tuple[i][1][k + 1] = &@field(@field(context, arg[1..dot]), arg[dot+1..]);
+                                                        tuple[i][1][k+1] = &@field(@field(context, arg[1..dot]), arg[dot+1..]);
                                                 } else {
-                                                        tuple[i][1][k + 1] = @field(@field(context, arg[0..dot]), arg[dot+1..]); 
+                                                        tuple[i][1][k+1] = @field(@field(context, arg[0..dot]), arg[dot+1..]); 
                                                 }
                                             } else if (arg[0] == '&') { 
-                                                tuple[i][1][k + 1] = &@field(context, arg[1..]);
+                                                tuple[i][1][k+1] = &@field(context, arg[1..]);
                                             } else {
-                                                tuple[i][1][k + 1] = @field(context, arg);
+                                                tuple[i][1][k+1] = @field(context, arg);
                                             }
                                         }
                                     },
-                                    // more types will be needed for depending on additional stages
+                                    // more types will be needed, depending on additional stages
                                     else => {
                                         if (debugStart) std.debug.print("else {} {}\n", .{ j, @typeInfo(@TypeOf(arg)) });
                                         unreachable;
@@ -598,8 +603,7 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
             return tuple;
         }
 
-// setup the pipe structs.  Only needs to be called once per instances.  An allocator is requied for the needed
-// storage arrays.
+// setup the pipe structs.  Only call once per PipeInstances.  An allocator is requied for the needed storage.
 
         pub fn setup(allocator: *std.mem.Allocator) *thePipe {
         
@@ -609,9 +613,9 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
             var nodes = self.nodes[0..];
 
             inline for (pipe) |stg, i| {
-                p[i] = Stage{ .i = i, .allocator = allocator }; // ensure default values are set
+                p[i] = Stage{ .i = i, .allocator = allocator };     // ensure default values are set
 
-                inline for (stg) |elem, j | {
+                inline for (stg) |elem, j | {                       // parse the pipe
                     switch (@typeInfo(@TypeOf(elem))) {
                         .Fn, .BoundFn => { // fn....
                             var name = @typeName(@TypeOf(elem));
@@ -628,14 +632,18 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
                         //},
                         .EnumLiteral => { // label (.any) or end (._)
                             if (j == 0) {
+                                if (elem == ._) {
+                                    std.debug.print("illegal ._ found: {}\n",.{stg});
+                                    unreachable;
+                                }
                                 p[i].label = @tagName(elem);
                                 if (debugStart) std.debug.print("label {} {s}\n", .{ i, elem });
                             } else {
-                                if (elem == ._) {
+                                if (elem == ._ ) {
                                     p[i].end = true;
                                     if (debugStart) std.debug.print("end {}\n", .{i});
                                 } else {
-                                    std.debug.print("expected ._ found: {}\n",.{stg});
+                                    
                                     unreachable;
                                 }
                             }
@@ -646,7 +654,8 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
                 }
             }
 
-            // to be optimized no to need an allocator or a hashmap
+            // *** to be optimized not to need an allocator or a hashmap (setup done) ***
+            
             // storage for hashmap used for node creation
             var buffer: [@sizeOf(@TypeOf(nodes)) + 1000]u8 = undefined;
             const buffalloc = &std.heap.FixedBufferAllocator.init(&buffer).allocator;
@@ -656,9 +665,8 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
             // create the pipe's nodes - all fields are initialized by .set or in .run so no Conn{} is needed
             var jj: u32 = 0;
             for (p) |item, ii| {
-                var stg = false;
-                if (item.name) |_|
-                    stg = true;
+
+                const stg = if (item.name) |_| true else false;
 
                 if (stg and !item.end) {
                     nodes[jj].set(p, ii, 0, ii + 1, 0);
@@ -720,7 +728,8 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
             return self;
         }
 
-        // run the pipe, you can repeat runs with different arg tuples (no need to rerun setup)
+// run the pipe, you can repeat runs with different arg_tuple(s) without redoing setup.
+
         pub fn run(self: *thePipe, tuple: std.meta.Tuple(arg_set)) !void {
             var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
             defer arena.deinit();
@@ -986,5 +995,7 @@ pub fn main() !void {
     
     // output the updated slice
     try sPiper.run(sPiper.args(x));
+    
+    std.debug.print("\n", .{});
     
 }    
