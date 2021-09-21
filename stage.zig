@@ -33,42 +33,16 @@ const Message = enum(u2) {
     sever,
 };
 
-    // const std = @import("std");   
-    //     
-    // const ttt = .{ u8, u64, i32}; 
-    // const &[_]type{};
-    //     
-    // const eee = std.meta.Tuple(&ttt);   
-    //     
-    // fn set(tfv:*eee, v:anytype) bool {   
-    //     comptime var i = 0;   
-    //     inline while (i<tfv.*.len) : (i+=1) {   
-    //         if (@TypeOf(tfv.*[i]) == @TypeOf(v)) {   
-    //             tfv.*[i] = v;   
-    //             return true;   
-    //     }   
-    // }   
-    // return false;    
-    // }   
-    //     
-    // pub fn main() void {   
-    // var ddd:eee = undefined;  // tuple for values   
-    // var abc:i32 = -1000;   
-    //     
-    // ddd = .{ .@"0" = 200, .@"1" = 3, .@"2" = -300};   
-    // var fff = ddd;   
-    //     
-    // _ = set(&ddd,abc);   
-    //     
-    // std.debug.print("{}\n{}",.{fff, ddd});   
-    // }   
-
-pub fn ReturnOf(comptime func: anytype) type {
-    return switch (@typeInfo(@TypeOf(func))) {
-        .Fn, .BoundFn => |fn_info| fn_info.return_type.?,
-        else => unreachable,
-    };
-}
+// pub fn ReturnOf(comptime func: anytype) type {
+//     return switch (@typeInfo(@TypeOf(func))) {
+//         .Fn, .BoundFn => |fn_info| fn_info.return_type.?,
+//         else => unreachable,
+//     };
+// }
+    
+// we use TypeUnion to store the values passed between stages.  We define the StageType by passing a tuple of types with
+// the types valid to use for the StageType.  We use Filters to create non generic versions of the filter functions with
+// specific types, validating that the types are valid for the StageType.
     
 pub fn TypeUnion(comptime list: anytype) type {     // list is atuple of the types in this typeUnion
 
@@ -172,6 +146,8 @@ pub fn TypeUnion(comptime list: anytype) type {     // list is atuple of the typ
     };
 }    
 
+// This is used to define the connections between stages (and pipes)
+
 pub fn ConnType(comptime S: type, comptime TU: type) type {
     return struct {
         pub const Conn = @This();
@@ -199,6 +175,8 @@ pub fn ConnType(comptime S: type, comptime TU: type) type {
     };
 }
 
+// used to create a type for stages that can be used with any of the types in the list, which needs to be a tuple of types.
+
 pub fn StageType(list: anytype) type {
 
     return struct {
@@ -216,7 +194,10 @@ pub fn StageType(list: anytype) type {
         name: ?[]const u8 = null,
         label: ?[]const u8 = null,
         end: bool = false,
-        i: usize = undefined,        
+        i: usize = undefined, 
+        allocator: *std.mem.Allocator = undefined,
+        
+// these are the commands that can be used inside filters.  Filters defines what a pipe stage does.        
         
         pub fn peekto(self: *Stage, comptime T:type) !T {
             if (debugCmd) std.log.info("peekto {*} inC {*}\n", .{ self, self.inC });
@@ -380,6 +361,10 @@ pub fn StageType(list: anytype) type {
     };
 }
 
+// using std.meta.args.Tuple implies that no filter can use generic functions.  We do not have to have there functions in
+// StageType since we generate the args for the functions in PipeInstance.args and can set the first arg to the StageType 
+// used by the pipe.  This can be done explicitly or via the generated type from Filters.
+
 pub fn Filters(comptime Stage:type, comptime T:type) type {
 
     std.debug.assert(Stage.TU.inUnion(T)); 
@@ -417,17 +402,22 @@ pub fn Filters(comptime Stage:type, comptime T:type) type {
                 for (slc.*) |d| {
                     _ = try self.output(d);
                 }
-            } else loop: {
-                var i:u32 = 0;
-                const max = slc.len;    // when updating, do not exceed the initial lenght of the slice
-                slc.len = i;
-                while (i<max) : (i += 1) {
-                    const d = self.peekto(T) catch { break :loop; };
-                    slc.len = i+1;
-                    slc.*[i] = d;
-                    _ = try self.readto(T);
-                }                                            
-                return error.outOfBounds;
+            } else { 
+                loop: {                     // probably should use an arraylist here and slice the results
+                    var i:u32 = 0;
+                    const max = slc.len;    // when updating, do not exceed the initial length of the slice
+                    slc.len = i;
+                    while (i<max) : (i += 1) {
+                        const d = self.peekto(T) catch { break :loop; };
+                        slc.len = i+1;
+                        slc.*[i] = d;
+                        _ = try self.readto(T);
+                    }                
+                    return error.outOfBounds;
+                }
+                //need to make a copy if we output it
+                //if (S.TU.inUnion(*[]T))
+                //    _ = self.output(slc) catch {};
             }
             return;
         }
@@ -440,7 +430,14 @@ pub fn Filters(comptime Stage:type, comptime T:type) type {
             while (true) {
                 if (debugStages) std.log.info("con in {}_{s} {*}", .{ self.i, self.name, self.inC });
                 var e = try self.peekto(T);
-                try stdout.print(" {}", .{e});
+                switch (@typeInfo(T)) { 
+                    .Int, .Enum, .Union => 
+                        try stdout.print(" {}", .{e}),
+                    .Pointer => 
+                        try stdout.print(" {any}", .{e}),
+                    else =>
+                        try stdout.print(" {}", .{e}),
+                }
                 _ = self.output(e) catch {};
                 _ = try self.readto(T);
             }
@@ -473,7 +470,9 @@ pub fn Filters(comptime Stage:type, comptime T:type) type {
     };
 }
             
-
+// Once we have defined the StageType, Filters, we need to create a take a pipe tuple and setup to run it using a 
+// PipeInstance.  The PipeInstances is used to set the args for a pipe using struct entires, the any required args 
+// are set the run funcion should be called to execute the pipe.
 
 pub fn PipeInstance(comptime T: type, pp: anytype) type {
 
@@ -530,6 +529,8 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
 
         // connection nodes
         nodes: [pipe.len]Conn = [_]Stage.Conn{undefined} ** pipe.len,
+        
+// associate the args with the stage's filters and a context struct.
 
         pub fn args(self: *thePipe, context: anytype) std.meta.Tuple(arg_set) {
         
@@ -597,25 +598,28 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
             return tuple;
         }
 
-        // setup the pipe structs.  Only needs to be called once.  
+// setup the pipe structs.  Only needs to be called once per instances.  An allocator is requied for the needed
+// storage arrays.
+
         pub fn setup(allocator: *std.mem.Allocator) *thePipe {
-            var self: *thePipe = allocator.create(thePipe) catch 
-                unreachable;
+        
+            var self: *thePipe = allocator.create(thePipe) catch unreachable;
 
             var p = self.p[0..]; // simipify life using slices
             var nodes = self.nodes[0..];
 
             inline for (pipe) |stg, i| {
-                p[i] = Stage{ .i = i }; // ensure default values are set
+                p[i] = Stage{ .i = i, .allocator = allocator }; // ensure default values are set
 
                 inline for (stg) |elem, j | {
                     switch (@typeInfo(@TypeOf(elem))) {
                         .Fn, .BoundFn => { // fn....
                             var name = @typeName(@TypeOf(elem));
                             const one = std.mem.indexOfPos(u8, name, 0, @typeName(Stage)).?;
-                            const start = std.mem.indexOfPos(u8, name, one + @typeName(Stage).len + 1, @typeName(Stage)).?;
-                            const end = std.mem.indexOfPos(u8, name, start + @typeName(Stage).len + 1, ")").?;
-                            p[i].name = name[start + @typeName(Stage).len + 1 .. end];
+                            const two = std.mem.indexOfPos(u8, name, one+@typeName(Stage).len+1, @typeName(Stage)).?;
+                            const start = std.mem.indexOfPos(u8, name, two+@typeName(Stage).len+1, ")").?;
+                            const end = std.mem.indexOfPos(u8, name, start+1, ")).").?;
+                            p[i].name = name[start+2 .. end];
                             if (debugStart) std.debug.print("stg {} {s}\n", .{i, p[i].name});
                         },
                         //.Pointer => { // *const u8...
@@ -642,6 +646,7 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
                 }
             }
 
+            // to be optimized no to need an allocator or a hashmap
             // storage for hashmap used for node creation
             var buffer: [@sizeOf(@TypeOf(nodes)) + 1000]u8 = undefined;
             const buffalloc = &std.heap.FixedBufferAllocator.init(&buffer).allocator;
@@ -912,10 +917,10 @@ pub fn main() !void {
     x.aaa += 3;
 
     // create pipe commands and stages for type u128
-    const uP = StageType(.{u64, u32});
+    const uP = StageType(.{u64, *[]u64});
     const f = Filters(uP,u64);
 
-    // a sample pipe using uP stages
+    // a sample pipe using uP stages, note that ._ indicates stage or connector's output is not connected
     const pipe = .{
         .{ f.gen, .{"aaa"} },
         .{ .a, f.exactdiv, .{"xxx"}},
@@ -929,7 +934,8 @@ pub fn main() !void {
         .{ .b, ._ },
     };
     
-    // play with a var
+    // play with a vars
+    x.xxx += 1;
     x.aaa += 7;
 
     // create a container for this pipe with type uP and setup the pipe's structure
@@ -964,9 +970,11 @@ pub fn main() !void {
     var sPiper = PipeInstance(uP, pSlicer).setup(allocator);
     try sPiper.run(sPiper.args(x));
     
+    const g = Filters(uP, *[]u64);
     const pSlicew = .{
         .{ f.gen, .{"ar.len"} },
-        .{ f.slice, .{"&sss"}, ._ },
+        .{ f.slice, .{"&sss"} },
+        .{ g.console, ._ },
     };
     
     std.debug.print("\n", .{});
