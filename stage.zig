@@ -104,7 +104,7 @@ pub fn TypeUnion(comptime list: anytype) type {     // list is atuple of the typ
                 }
             }
             std.debug.print("put: type {} not in TypeUnion {}\n",.{@TypeOf(v),TU});
-            unreachable;
+            unreachable;    
         }
         
         // return the value of typeUnion - validate that stored and requested types match.
@@ -119,7 +119,8 @@ pub fn TypeUnion(comptime list: anytype) type {     // list is atuple of the typ
                     unreachable;                 
                 }
             } 
-            unreachable;    // not initialized
+            std.debug.print("get: Union {} instance not initialized\n",.{list});
+            unreachable;    
         }
 
         // test if type is in typeUnion
@@ -195,7 +196,6 @@ pub fn StageType(list: anytype) type {
         rc: anyerror!void = undefined,
         n: []Conn = undefined,
         name: ?[]const u8 = null,
-        label: ?[]const u8 = null,
         end: bool = false,
         i: usize = undefined, 
         allocator: *std.mem.Allocator = undefined,
@@ -477,35 +477,46 @@ pub fn Filters(comptime Stage:type, comptime T:type) type {
 
 pub fn PipeInstance(comptime T: type, pp: anytype) type {
 
-    // build tuple of types for stage Fn and Args
-    comptime var arg_set: []const type = &[_]type{};
-    
+    comptime var lmap = [_]?u8{null} ** pp.len;             // mapping for stg to label 
+    comptime var nodesLen = pp.len;                         // number of nodes for the pipe
     comptime var labels:std.meta.Tuple(                     // list of enum literals type for labels
         list: {
             comptime var l: []const type = &[_]type {};
             inline for (pp) |stg| {
-                if (@typeInfo(@TypeOf(stg[0])) == .EnumLiteral and stg.len>1 and @typeInfo(@TypeOf(stg[1])) != .EnumLiteral)
+                if (@typeInfo(@TypeOf(stg[0])) == .EnumLiteral and stg.len>1 and @typeInfo(@TypeOf(stg[1])) != .EnumLiteral) {
                     l = l ++ &[_]type{@TypeOf(stg[0])};
+                }
             }
             break :list l;                                  // return tuple of enum literal types, to create labels tuple
         } ) = undefined;
-    comptime var defn:[labels.len]u8 = undefined;           // stage the label is defined in
-    comptime var lmap = [_]bool{false} ** pp.len;           // stage starts with a label
-    {   
-        comptime var j = 0;                                 // save enum literals in the labels tuple
-        inline for (pp) |stg, i| {
-            if (@typeInfo(@TypeOf(stg[0])) == .EnumLiteral and stg[0] != ._) {
-                lmap[i] = true;
-                if (stg.len>1 and @typeInfo(@TypeOf(stg[1])) != .EnumLiteral) {
-                    labels[j] = stg[0];
-                    defn[j] = i;
-                    j += 1;
+    {                                                       // context block - we want to use k later in runtime
+        comptime var k = 0;                                 // save enum literals in the labels tuple
+        inline for (pp) |stg| {
+            if (@typeInfo(@TypeOf(stg[0])) == .EnumLiteral and stg.len>1 and @typeInfo(@TypeOf(stg[1])) != .EnumLiteral) {
+                labels[k] = stg[0];
+                k += 1;
+            }                                               // nodesLen may need adjustment with addpipe/callpipe
+            inline for (stg) |elem, j| {
+                if (@typeInfo(@TypeOf(elem)) == .EnumLiteral and elem == ._) {
+                    if (j>0) 
+                        nodesLen -= 1
+                    else
+                        unreachable;    // illegal ._ at start of stage Tuple
                 }
             }
-        }                                                   // *** should compute the number of nodes here too
-    }                                                       // *** node array cannot be comptime (connections are dynamic)
-   
-    inline for (pp) |stg, i| {                              // create the args_set tuple for args function
+        }
+        inline for (pp) |stg, i| {
+            if (@typeInfo(@TypeOf(stg[0])) == .EnumLiteral and stg[0] != ._) {
+                for (labels) |lbl, j| {
+                    if (stg[0] == lbl)
+                        lmap[i] = j;                        // save the mapping
+                }
+            }
+        }
+    }  
+
+    comptime var arg_set: []const type = &[_]type{};        // build tuple of types for stage Fn and Args
+    inline for (pp) |stg, i| {                              // fill in the args
         comptime var flag: bool = true;
         inline for (stg) |elem| {
             const E = @typeInfo(@TypeOf(elem));           
@@ -519,9 +530,8 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
             }
         }
         if (flag)
-            arg_set = arg_set ++ &[_]type{std.meta.Tuple(&[_]type{void})};
+            arg_set = arg_set ++ &[_]type{std.meta.Tuple(&[_]type{void})};  
     }
-    
 
     return struct {
         const Stage = T;            // the StageType
@@ -533,7 +543,7 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
         p: [pipe.len]Stage = [_]Stage{undefined} ** pipe.len,
 
         // connection nodes
-        nodes: [pipe.len]Conn = [_]Stage.Conn{undefined} ** pipe.len,
+        nodes: [nodesLen]Conn = [_]Stage.Conn{undefined} ** nodesLen,
         
 // associate the args with the stage's filters and a context struct.  Returns an arg_tuple
 
@@ -578,7 +588,7 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
                                     // more types will be needed, depending on additional stages
                                     else => {
                                         if (debugStart) std.debug.print("else {} {}\n", .{ j, @typeInfo(@TypeOf(arg)) });
-                                        unreachable;
+                                        unreachable;  // unsupported arg type
                                     },
                                 }
                             }
@@ -631,82 +641,64 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
                         //    p[i].label = elem;
                         //},
                         .EnumLiteral => { // label (.any) or end (._)
-                            if (j == 0) {
-                                if (elem == ._) {
-                                    std.debug.print("illegal ._ found: {}\n",.{stg});
-                                    unreachable;
-                                }
-                                p[i].label = @tagName(elem);
-                                if (debugStart) std.debug.print("label {} {s}\n", .{ i, elem });
-                            } else {
-                                if (elem == ._ ) {
-                                    p[i].end = true;
-                                    if (debugStart) std.debug.print("end {}\n", .{i});
-                                } else {
-                                    
-                                    unreachable;
-                                }
-                            }
-                            
+                            if (j > 0 and elem == ._) {                     // j == 0 case caught by constructor
+                                p[i].end = true;
+                                if (debugStart) std.debug.print("end {}\n", .{i});
+                            }                             
                         },
                         else => {},
                     }
                 }
             }
 
-            // *** to be optimized not to need an allocator or a hashmap (setup done) ***
-            
-            // storage for hashmap used for node creation
-            var buffer: [@sizeOf(@TypeOf(nodes)) + 1000]u8 = undefined;
-            const buffalloc = &std.heap.FixedBufferAllocator.init(&buffer).allocator;
-            var map = std.hash_map.StringHashMap(Conn).init(buffalloc);
-            defer map.deinit();
+            // var buffer: [@sizeOf(@TypeOf(nodes)) + 1000]u8 = undefined;
+            // const buffalloc = &std.heap.FixedBufferAllocator.init(&buffer).allocator;
+            // var map = std.hash_map.StringHashMap(Conn).init(buffalloc);
+            // defer map.deinit();
+          
+            var map:[nodesLen]?Conn = undefined;
+            for (map) |*e| { e.* = null; }
 
             // create the pipe's nodes - all fields are initialized by .set or in .run so no Conn{} is needed
-            var jj: u32 = 0;
-            for (p) |item, ii| {
-
+            var j: u32 = 0;
+            for (p) |item, i|  {
+                
                 const stg = if (item.name) |_| true else false;
 
                 if (stg and !item.end) {
-                    nodes[jj].set(p, ii, 0, ii + 1, 0);
-                    jj += 1;
+                    nodes[j].set(p, i, 0, i + 1, 0);
+                    j += 1;
                 }
-
-                if (item.label) |lbl| {
-                    if (map.get(lbl)) |*k| {
+                
+                if (lmap[i]) |lbl| {
+                    if (map[lbl]) |*k| {
                         if (!stg) {
                             if (item.end) {
-                                nodes[jj - 1].set(p, ii - 1, 0, k.to, k.sin);
+                                nodes[j - 1].set(p, i - 1, 0, k.to, k.sin);
                                 k.set(p, k.from, k.sout, k.to, k.sin + 1);
                             } else {
-                                nodes[jj].set(p, k.from, k.sout, ii + 1, 0);
-                                jj += 1;
+                                nodes[j].set(p, k.from, k.sout, i + 1, 0);
+                                j += 1;
                                 k.set(p, k.from, k.sout + 1, k.to, k.sin);
                             }
                         } else {
-                            if (!item.end) {
-                                nodes[jj].set(p, k.from, k.sout, ii, k.sin);
-                                jj += 1;
+                            if (item.end) {
+                                nodes[j].set(p, k.from, k.sout, i, k.sin);
+                                j += 1;
                                 k.set(p, k.from, k.sout + 1, k.to, k.sin + 1);
                             }
                         }
-                        map.put(lbl, k.*) catch 
-                            unreachable;
                     } else if (stg) {
-                        var k = Conn{};
-                        k.set(p, ii, 1, ii, 1);
-                        map.put(lbl, k) catch 
-                            unreachable;
+                        map[lbl] = Conn{};
+                        map[lbl].?.set(p, i, 1, i, 1);
                     }
                 }
-
-                if (debugStart) std.debug.print("{} {}\n", .{ ii, jj });
+                if (debugStart) std.debug.print("{} {}\n", .{ i, j });
             }
 
             // save the node slice in the stages;
-            for (p) | _, ii| {
-                p[ii].n = self.nodes[0..jj];
+            for (p) | _, i| {
+                p[i].n = self.nodes[0..j];
             }
 
             // debug
@@ -718,10 +710,10 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
                         std.debug.print("{} {s} {s} {} \n", .{ s.i, s.label, s.name, s.end });
                 }
 
-                var kk: u32 = 0;
-                while (kk < jj) : (kk += 1) {
-                    const c = nodes[kk];
-                    std.debug.print("{} {s}({}),{} -> {s}({}),{}\n", .{ kk, p[c.from].name, c.from, c.sout, p[c.to].name, c.to, c.sin });
+                var k: u32 = 0;
+                while (k < j) : (k += 1) {
+                    const c = nodes[k];
+                    std.debug.print("{} {s}({}),{} -> {s}({}),{}\n", .{ k, p[c.from].name, c.from, c.sout, p[c.to].name, c.to, c.sin });
                 }
             }
 
@@ -766,6 +758,22 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
 
                 if (loop < 10) for (nodes) |*c| {
                 
+                    // dispatch a pending output
+                    if (c == c.src.outC and c.src.state == .output and c.in != .data and c.src.commit == commit) {
+                        if (debugLoop) {
+                            if (state == 1)
+                                loop += 1
+                            else {
+                                state = 1;
+                                loop = 0;
+                            }
+                        }
+                        if (debugDisp) std.log.info("pre o src.state {} {}_{s} sout {} in {} {}\n\n", .{ c.src.state, c.src.i, c.src.name, c.sout, c.in, c.data });
+                        resume c.src.frame;
+                        continue :running;
+                    }
+
+                    
                     // dispatch a pending peekto or readto
                     if (c == c.dst.inC and (c.dst.state == .peekto or c.dst.state == .readto) and c.in != .ok and c.dst.commit == commit) {
                         if (debugLoop) {
@@ -797,20 +805,6 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
                         continue :running;
                     }
 
-                    // dispatch a pending output
-                    if (c == c.src.outC and c.src.state == .output and c.in != .data and c.src.commit == commit) {
-                        if (debugLoop) {
-                            if (state == 1)
-                                loop += 1
-                            else {
-                                state = 1;
-                                loop = 0;
-                            }
-                        }
-                        if (debugDisp) std.log.info("pre o src.state {} {}_{s} sout {} in {} {}\n\n", .{ c.src.state, c.src.i, c.src.name, c.sout, c.in, c.data });
-                        resume c.src.frame;
-                        continue :running;
-                    }
 
                     // compete a sever after any data in the node is consumed
                     if ((c.src.outC == null and c.in == .ok) or (c.dst.inC == null and c.in == .ok)) {
@@ -930,16 +924,16 @@ pub fn main() !void {
     const f = Filters(uP,u64);
 
     // a sample pipe using uP stages, note that ._ indicates stage or connector's output is not connected
-    const pipe = .{
-        .{ f.gen, .{"aaa"} },
-        .{ .a, f.exactdiv, .{"xxx"}},
-        .{ .b, f.fanin },
-        .{ f.console, ._ },
+    const pipe = .{ 
+        .{ f.gen, .{"aaa"} },           // generate a steam of numbers and pass each to the next stage
+        .{ .a, f.exactdiv, .{"xxx"}},   // exact goes to fanin, otherwise to exactdiv(7) via .a
+        .{ .b, f.fanin },               // take input from any stream and pass it to console
+        .{ f.console, ._ },             // output to console
         .{ .a },
-        .{ .c, f.exactdiv, .{7}},
+        .{ .c, f.exactdiv, .{7}},       // exact goes via label .b to fanin, otherwise to exactdiv(22) via .c
         .{ .b, ._ },
         .{ .c },
-        .{ f.exactdiv, .{11}},
+        .{ f.exactdiv, .{11}},          // exact goes via label b to fanint, otherwise ignore number
         .{ .b, ._ },
     };
     
@@ -970,7 +964,7 @@ pub fn main() !void {
     try myPipe.run(myPipe.args(y));
     
     const pSlicer = .{
-        .{ f.slice, .{"&sss"} },
+        .{ f.slice, .{"&sss"} },    // extract elements of slice sss and pass to console
         .{ f.console, ._ },
     };
     
@@ -979,11 +973,10 @@ pub fn main() !void {
     var sPiper = PipeInstance(uP, pSlicer).setup(allocator);
     try sPiper.run(sPiper.args(x));
     
-    const g = Filters(uP, *[]u64);
+    // const g = Filters(uP, *[]u64);      // for later
     const pSlicew = .{
         .{ f.gen, .{"ar.len"} },
-        .{ f.slice, .{"&sss"} },
-        .{ g.console, ._ },
+        .{ f.slice, .{"&sss"}, ._ },    // update slice with generated values
     };
     
     std.debug.print("\n", .{});
