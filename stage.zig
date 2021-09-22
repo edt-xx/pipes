@@ -919,18 +919,16 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
     };
 }
 
-// two context structs
+// two context structs (must be pub for cross file access)
 pub const x = struct {
-    var xxx: u16 = 5;
-    var aaa: u16 = 100;
-    var ar = [_]u64{ 11, 22, 33, 44 };
-    var sss: []u64 = ar[0..];
+    pub var xxx: u16 = 5;
+    pub var aaa: u16 = 100;
+    pub var ar = [_]u64{ 11, 22, 33, 44 };
+    pub var sss: []u64 = ar[0..];
 };
 
-pub const y = struct {
-    var xxx: u16 = 17;
-    var aaa: u16 = 80;
-};
+
+pub var testme:u64 = 50;
 
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -978,7 +976,13 @@ pub fn main() !void {
     try myPipe.run(x);
     
     std.debug.print("\n", .{});
-    
+   
+   const y = struct {
+    pub var xxx: u16 = 17;      // must be pub
+    pub var aaa: u16 = 80;
+    };
+
+   
     // and using a different context structure
     try myPipe.run(y);
     
@@ -1008,12 +1012,16 @@ pub fn main() !void {
     // output the updated slice
     try sPiper.run(x);
     
+    const root =  @import("root");
+    _ = root;
+    //pub var testme:u64 = 20;
+    _ = testme;
     const pNoContect = .{
-        .{ f.gen, .{10} },
+        .{ f.gen, .{"testme"} },
         .{ f.console, ._ },    // update slice with generated values
     };
     
-    try PipeInstance(uP, pNoContect).setup(allocator).run(void);
+    try PipeInstance(uP, pNoContect).setup(allocator).run(@This());
     
     std.debug.print("\n", .{});
     
