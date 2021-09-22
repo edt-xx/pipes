@@ -547,7 +547,7 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
         
 // associate the args with the stage's filters and a context struct.  Returns an arg_tuple
 
-        pub fn args(self: *thePipe, context: anytype) std.meta.Tuple(arg_set) {
+        fn args(self: *thePipe, context: anytype) std.meta.Tuple(arg_set) {
         
             //tuple for calling fn(s) allong with the arguement tuples reguired
             var tuple: std.meta.Tuple(arg_set) = undefined;
@@ -564,31 +564,49 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
                         },
                         .Struct => { // struct....
                             inline for (elem) |arg, k| {
+                                //@compileLog(i);
+                                //@compileLog(@typeInfo(@TypeOf(tuple[i][1][k+1])));
+                                //@compileLog(arg);
                                 switch (@typeInfo(@TypeOf(arg))) {
-                                    .Int, .ComptimeInt => { // constants
+                                    .Int, .ComptimeInt, .ComptimeFloat => { // constants
                                         if (debugStart) std.debug.print("Int {} {}\n", .{ j, arg });
-                                        tuple[i][1][k + 1] = arg;
+                                        tuple[i][1][k+1] = arg;
                                     },
                                     .Pointer => { // string with a var, &var, var.field or &var.field (use a slice, not an array)
                                         if (debugStart) std.debug.print("Ptr {} {s}\n", .{ j, arg });
-                                        comptime {
-                                            if (std.mem.indexOfPos(u8, arg, 0, ".")) |dot| { // handle single level struct.field
-                                                if (arg[0] == '&') {
-                                                        tuple[i][1][k+1] = &@field(@field(context, arg[1..dot]), arg[dot+1..]);
-                                                } else {
-                                                        tuple[i][1][k+1] = @field(@field(context, arg[0..dot]), arg[dot+1..]); 
-                                                }
-                                            } else if (arg[0] == '&') { 
-                                                tuple[i][1][k+1] = &@field(context, arg[1..]);
-                                            } else {
-                                                tuple[i][1][k+1] = @field(context, arg);
+                                        // this would be much simpiler if runtime vars worked in nested tuples...
+                                        if (context != void) comptime {
+                                            // use the type of the args tuple to decide what we are pointing too
+                                            switch (@typeInfo(@TypeOf(tuple[i][1][k+1]))) {
+                                                .Int, .Float => {
+                                                    if (std.mem.indexOfPos(u8, arg, 0, ".")) |dot|  // single level struct.field
+                                                        tuple[i][1][k+1] = @field(@field(context, arg[0..dot]), arg[dot+1..])
+                                                    else
+                                                        tuple[i][1][k+1] = @field(context, arg);
+                                                },
+                                                .Pointer => |p| {
+                                                    switch (@typeInfo(p.child)) {
+                                                        .Int, .Float, .Pointer, .Struct => {
+                                                            if (std.mem.indexOfPos(u8, arg, 0, ".")) |dot|  // single level 
+                                                                tuple[i][1][k+1]=&@field(@field(context,arg[0..dot]), arg[dot+1..])
+                                                            else
+                                                                tuple[i][1][k+1]=&@field(context, arg);
+                                                        },
+                                                        else => {
+                                                            @compileLog(p.child);
+                                                            @compileLog(@typeInfo(p.child));
+                                                        },
+                                                    }
+                                                },
+                                                else => {
+                                                    @compileLog(@typeInfo(@TypeOf(tuple[i][1][k+1])));  // unsupported arg type
+                                                },
                                             }
-                                        }
+                                        };
                                     },
                                     // more types will be needed, depending on additional stages
                                     else => {
-                                        if (debugStart) std.debug.print("else {} {}\n", .{ j, @typeInfo(@TypeOf(arg)) });
-                                        unreachable;  // unsupported arg type
+                                        @compileLog(@typeInfo(@TypeOf(arg)));  // unsupported arg type
                                     },
                                 }
                             }
@@ -722,7 +740,9 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
 
 // run the pipe, you can repeat runs with different arg_tuple(s) without redoing setup.
 
-        pub fn run(self: *thePipe, tuple: std.meta.Tuple(arg_set)) !void {
+        pub fn run(self: *thePipe, context:anytype) !void {
+        
+            const tuple = self.args(context);
             var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
             defer arena.deinit();
             const allocator = &arena.allocator;
@@ -922,7 +942,9 @@ pub fn main() !void {
     // create pipe commands and stages for type u128
     const uP = StageType(.{u64, *[]u64});
     const f = Filters(uP,u64);
-
+    
+    //var xxx:u64 = 75;
+    
     // a sample pipe using uP stages, note that ._ indicates stage or connector's output is not connected
     const pipe = .{ 
         .{ f.gen, .{"aaa"} },           // generate a steam of numbers and pass each to the next stage
@@ -944,11 +966,8 @@ pub fn main() !void {
     // create a container for this pipe with type uP and setup the pipe's structure
     var myPipe = PipeInstance(f.S, pipe).setup(allocator);
 
-    // create and fill in an args tuple for this pipe base on using context x.
-    const myPipeArgs = myPipe.args(x);
-
     // run the pipe with the above args
-    try myPipe.run(myPipeArgs);
+    try myPipe.run(x);
 
     std.debug.print("\n", .{});
 
@@ -956,27 +975,27 @@ pub fn main() !void {
     x.xxx = 13;
 
     // run again with updated args
-    try myPipe.run(myPipe.args(x));
+    try myPipe.run(x);
     
     std.debug.print("\n", .{});
     
     // and using a different context structure
-    try myPipe.run(myPipe.args(y));
+    try myPipe.run(y);
     
     const pSlicer = .{
-        .{ f.slice, .{"&sss"} },    // extract elements of slice sss and pass to console
+        .{ f.slice, .{"sss"} },    // extract elements of slice sss and pass to console
         .{ f.console, ._ },
     };
     
     std.debug.print("\n", .{});
     
     var sPiper = PipeInstance(uP, pSlicer).setup(allocator);
-    try sPiper.run(sPiper.args(x));
+    try sPiper.run(x);
     
     // const g = Filters(uP, *[]u64);      // for later
     const pSlicew = .{
         .{ f.gen, .{"ar.len"} },
-        .{ f.slice, .{"&sss"}, ._ },    // update slice with generated values
+        .{ f.slice, .{"sss"}, ._ },    // update slice with generated values
     };
     
     std.debug.print("\n", .{});
@@ -984,10 +1003,17 @@ pub fn main() !void {
     var sPipew = PipeInstance(uP, pSlicew).setup(allocator);
     
     // update the slice
-    try sPipew.run(sPipew.args(x));
+    try sPipew.run(x);
     
     // output the updated slice
-    try sPiper.run(sPiper.args(x));
+    try sPiper.run(x);
+    
+    const pNoContect = .{
+        .{ f.gen, .{10} },
+        .{ f.console, ._ },    // update slice with generated values
+    };
+    
+    try PipeInstance(uP, pNoContect).setup(allocator).run(void);
     
     std.debug.print("\n", .{});
     
