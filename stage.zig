@@ -19,6 +19,7 @@ const State = enum(u4) {
 };
 
 const stageError = error{
+    ok,
     endOfStream,
     noInStream,
     noOutStream,
@@ -427,18 +428,10 @@ pub fn Filters(comptime Stage:type, comptime T:type) type {
             defer { self.endStage(); }
             const stdout = std.io.getStdOut().writer();
             if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
-            
             while (true) {
                 if (debugStages) std.log.info("con in {}_{s} {*}", .{ self.i, self.name, self.inC });
-                var e = try self.peekto(T);
-                switch (@typeInfo(T)) { 
-                    .Int, .Enum, .Union => 
-                        try stdout.print(" {}", .{e}),
-                    .Pointer => 
-                        try stdout.print(" {any}", .{e}),
-                    else =>
-                        try stdout.print(" {}", .{e}),
-                }
+                const e = try self.peekto(T);
+                try stdout.print("{any} ",.{e});
                 _ = self.output(e) catch {};
                 _ = try self.readto(T);
             }
@@ -447,9 +440,10 @@ pub fn Filters(comptime Stage:type, comptime T:type) type {
         fn fanin(self:*S) callconv(.Async) !void {
             defer { self.endStage(); }
             if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
+            
             while (true) {
-                _ = self.selectAnyInput() catch |err| {
-                    if (err == error.endOfStream) continue else return err;
+                _ = self.selectAnyInput() catch |e| {
+                    if (e == error.endOfStream) continue else return e;
                 };
                 if (debugStages) std.log.info("fan {}_{s} {*} {*}", .{ self.i, self.name, self.inC, self.outC });
                 const tmp = try self.peekto(S.TU);
@@ -457,11 +451,22 @@ pub fn Filters(comptime Stage:type, comptime T:type) type {
                 _ = try self.readto(S.TU);
             }
         }
+        
+        fn copy(self:*S) callconv(.Async) !void {
+            defer { self.endstage(); }
+            if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
+            
+            while (true) {
+                const tmp = try self.readto(S.TU);
+                try self.output(tmp);
+            }
+        }
 
         fn gen(self:*S, limit: T) callconv(.Async) !void {
             defer { self.endStage(); }
             if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
-            var i:u64 = 0;
+            
+            var i:T = 0;
             while (i < limit) : (i += 1) {
                 if (debugStages) std.log.info("gen out {}_{s} {*}", .{ self.i, self.name, self.outC });
                 try self.output(i);
@@ -568,14 +573,18 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
                                 //@compileLog(@typeInfo(@TypeOf(tuple[i][1][k+1])));
                                 //@compileLog(arg);
                                 switch (@typeInfo(@TypeOf(arg))) {
-                                    .Int, .ComptimeInt, .ComptimeFloat => { // constants
+                                    .Int, .Float, .ComptimeInt, .ComptimeFloat => {                 // constants
                                         if (debugStart) std.debug.print("Int {} {}\n", .{ j, arg });
                                         tuple[i][1][k+1] = arg;
                                     },
-                                    .Pointer => { // string with a var, &var, var.field or &var.field (use a slice, not an array)
+                                    .Pointer => { // string with a var, var.field or (use a slice, not an array)
                                         if (debugStart) std.debug.print("Ptr {} {s}\n", .{ j, arg });
+                                        
                                         // this would be much simpiler if runtime vars worked in nested tuples...
-                                        if (context != void) comptime {
+                                        
+                                        if (@TypeOf(tuple[i][1][k+1]) == []const u8) {              // tuple expects a string
+                                            tuple[i][1][k+1]=arg;                                       
+                                        } else if (context != void) comptime {                                            
                                             // use the type of the args tuple to decide what we are pointing too
                                             switch (@typeInfo(@TypeOf(tuple[i][1][k+1]))) {
                                                 .Int, .Float => {
@@ -589,7 +598,7 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
                                                         .Int, .Float, .Pointer, .Struct => {
                                                             if (std.mem.indexOfPos(u8, arg, 0, ".")) |dot|  // single level 
                                                                 tuple[i][1][k+1]=&@field(@field(context,arg[0..dot]), arg[dot+1..])
-                                                            else
+                                                            else 
                                                                 tuple[i][1][k+1]=&@field(context, arg);
                                                         },
                                                         else => {
@@ -599,14 +608,14 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
                                                     }
                                                 },
                                                 else => {
-                                                    @compileLog(@typeInfo(@TypeOf(tuple[i][1][k+1])));  // unsupported arg type
+                                                    @compileLog(@TypeOf(tuple[i][1][k+1]));  // unsupported arg type
                                                 },
                                             }
                                         };
                                     },
                                     // more types will be needed, depending on additional stages
                                     else => {
-                                        @compileLog(@typeInfo(@TypeOf(arg)));  // unsupported arg type
+                                        @compileLog(@TypeOf(arg));  // unsupported arg type
                                     },
                                 }
                             }
@@ -982,7 +991,6 @@ pub fn main() !void {
     pub var aaa: u16 = 80;
     };
 
-   
     // and using a different context structure
     try myPipe.run(y);
     
