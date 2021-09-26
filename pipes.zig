@@ -1,16 +1,17 @@
 const std = @import("std");
 
-const debugDisp = false;
-const debugLoop = false;
-const debugStages = false;
-const debugCmd = false;
-const debugStart = false;
+const build_options = @import("build_options");
+const debugDisp = build_options.debugDisp;
+const debugLoop = build_options.debugLoop;
+const debugStages = build_options.debugStages;
+const debugCmd = build_options.debugCmd;
+const debugStart = build_options.debugStart;
 
 // will later exploit usingnamespace to allow users to add stages to library of stages
 
 const State = enum(u4) {
-    peekto,
-    readto,
+    peekTo,
+    readTo,
     output,
     start,
     run,
@@ -53,7 +54,7 @@ pub fn TypeUnion(comptime list: anytype) type {     // list is atuple of the typ
     if (!info.Struct.is_tuple)
             @compileError("Struct type must be a tuple type");
 
-    // define the typedUnion's enum (ESet)
+    // define the typedUnion's enum (ESet) based on std.meta.FieldEnum
     comptime var s=0;
     comptime var a=0;
     comptime var enumFields: [list.len]std.builtin.TypeInfo.EnumField = undefined;
@@ -76,7 +77,7 @@ pub fn TypeUnion(comptime list: anytype) type {     // list is atuple of the typ
         });
     
     return struct {
-        const TU = @This();
+        pub const TU = @This();
         
         // create buffer for the value with correct alignment and size for the included types
         value: [s]u8 align(a) = [_]u8{undefined} ** s, 
@@ -202,21 +203,44 @@ pub fn StageType(list: anytype) type {
         allocator: *std.mem.Allocator = undefined,
         
 // these are the commands that can be used inside filters.  Filters defines what a pipe stage does.        
-        
-        pub fn peekto(self: *Stage, comptime T:type) !T {
-            if (debugCmd) std.log.info("peekto {*} inC {*}\n", .{ self, self.inC });
+   
+        pub fn typeTo(self: *Stage, comptime T:type) !bool {
+            if (debugCmd) std.log.info("peekTo {*} inC {*}\n", .{ self, self.inC });
             if (self.inC) |c| {
-                if (debugCmd) std.log.info("peekto {*} in {} {}\n", .{ c, c.in, c.data });
+                if (debugCmd) std.log.info("peekTo {*} in {} {}\n", .{ c, c.in, c.data });
                 while (c.in == .ok) {
                     suspend {
-                        self.state = .peekto;
+                        self.state = .peekTo;
                         self.frame = @frame();
                     }
                 }
             }
             self.state = .done;
             if (self.inC) |c| {
-                if (debugCmd) std.log.info("peekto {}_{s} {} in {} {}\n", .{ self.i, self.name, c.sout, c.in, c.data });
+                if (debugCmd) std.log.info("peekTo {}_{s} {} in {} {}\n", .{ self.i, self.name, c.sout, c.in, c.data });
+                if (c.in == .data) {
+                    return c.data.typeIs(T);
+                } else {
+                    return error.endOfStream;
+                }
+            }
+            return error.noInStream;
+        }   
+   
+        pub fn peekTo(self: *Stage, comptime T:type) !T {
+            if (debugCmd) std.log.info("peekTo {*} inC {*}\n", .{ self, self.inC });
+            if (self.inC) |c| {
+                if (debugCmd) std.log.info("peekTo {*} in {} {}\n", .{ c, c.in, c.data });
+                while (c.in == .ok) {
+                    suspend {
+                        self.state = .peekTo;
+                        self.frame = @frame();
+                    }
+                }
+            }
+            self.state = .done;
+            if (self.inC) |c| {
+                if (debugCmd) std.log.info("peekTo {}_{s} {} in {} {}\n", .{ self.i, self.name, c.sout, c.in, c.data });
                 if (c.in == .data) {
                     return c.data.get(T);
                 } else {
@@ -226,11 +250,11 @@ pub fn StageType(list: anytype) type {
             return error.noInStream;
         }
 
-        pub fn readto(self: *Stage, comptime T: type) !T {
+        pub fn readTo(self: *Stage, comptime T: type) !T {
             if (self.inC) |c| {
                 while (c.in == .ok) {
                     suspend {
-                        self.state = .readto;
+                        self.state = .readTo;
                         self.frame = @frame();
                     }
                 }
@@ -362,125 +386,12 @@ pub fn StageType(list: anytype) type {
     
     };
 }
-
-// using std.meta.args.Tuple implies that no filter can use generic functions.  We use Filter to generate filter functions
-// that are not generic.  We do not have the functions in StageType since we generate the args for the functions via
-// PipeInstance.args and can set the first arg of the non generic filter function to the StageType used by the pipe.  
-
-pub fn Filters(comptime Stage:type, comptime T:type) type {
-
-    std.debug.assert(Stage.TU.inUnion(T)); 
-    
-    return struct {
-    
-        const S = Stage; 
-        
-        fn exactdiv(self:*S, d: T) callconv(.Async) !void {
-            defer { self.endStage(); }
-            if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
-            while (true) {
-                if (debugStages) std.log.info("div pre peek {}_{s} {*}", .{ self.i, self.name, self.outC });
-                var i = try self.peekto(u64);
-                //if (debugStages) std.log.info("div post peek {}_{s} {}",.{self.i, self.name, i});
-                if (i % d == 0)
-                    try self.selectOutput(0)
-                else
-                    self.selectOutput(1) catch |err| {
-                        if (err != error.noOutStream) return err;
-                    };
-                if (debugStages) std.log.info("div out {}_{s} {*}", .{ self.i, self.name, self.outC });
-                _ = self.output(i) catch |err| {
-                    if (err != error.noOutStream) return err;
-                };
-                _ = try self.readto(u64);
-            }
-        }
-        
-        fn slice(self:*S, slc:*[]T) callconv(.Async) !void {
-            defer { self.endStage(); }
-            var input:bool = false;
-            _ = self.selectInput(0) catch |err| { if (err == error.noInStream) input = true; };
-            if (input) {
-                for (slc.*) |d| {
-                    _ = try self.output(d);
-                }
-            } else { 
-                loop: {                     // probably should use an arraylist here and slice the results
-                    var i:u32 = 0;
-                    const max = slc.len;    // when updating, do not exceed the initial length of the slice
-                    slc.len = i;
-                    while (i<max) : (i += 1) {
-                        const d = self.peekto(T) catch { break :loop; };
-                        slc.len = i+1;
-                        slc.*[i] = d;
-                        _ = try self.readto(T);
-                    }                
-                    return error.outOfBounds;
-                }
-                //need to make a copy if we output it
-                //if (S.TU.inUnion(*[]T))
-                //    _ = self.output(slc) catch {};
-            }
-            return;
-        }
-
-        fn console(self:*S) callconv(.Async) !void {
-            defer { self.endStage(); }
-            const stdout = std.io.getStdOut().writer();
-            if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
-            while (true) {
-                if (debugStages) std.log.info("con in {}_{s} {*}", .{ self.i, self.name, self.inC });
-                const e = try self.peekto(T);
-                try stdout.print("{any} ",.{e});
-                _ = self.output(e) catch {};
-                _ = try self.readto(T);
-            }
-        }
-
-        fn fanin(self:*S) callconv(.Async) !void {
-            defer { self.endStage(); }
-            if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
-            
-            while (true) {
-                _ = self.selectAnyInput() catch |e| {
-                    if (e == error.endOfStream) continue else return e;
-                };
-                if (debugStages) std.log.info("fan {}_{s} {*} {*}", .{ self.i, self.name, self.inC, self.outC });
-                const tmp = try self.peekto(S.TU);
-                try self.output(tmp);
-                _ = try self.readto(S.TU);
-            }
-        }
-        
-        fn copy(self:*S) callconv(.Async) !void {
-            defer { self.endstage(); }
-            if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
-            
-            while (true) {
-                const tmp = try self.readto(S.TU);
-                try self.output(tmp);
-            }
-        }
-
-        fn gen(self:*S, limit: T) callconv(.Async) !void {
-            defer { self.endStage(); }
-            if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
-            
-            var i:T = 0;
-            while (i < limit) : (i += 1) {
-                if (debugStages) std.log.info("gen out {}_{s} {*}", .{ self.i, self.name, self.outC });
-                try self.output(i);
-            }
-        }
-    
-    };
-}
             
 // Once we have defined the StageType & Filters types, we need to use a pipe tuple and prepare to run it using a 
 // PipeInstance.  The PipeInstances is used to set the args for a pipe using struct(s) as context blocks.  Any required 
 // args are set, the run funcion should be called to execute the pipe.
 
-pub fn PipeInstance(comptime T: type, pp: anytype) type {
+pub fn Make(comptime T: type, pp: anytype) type {
 
     comptime var lmap = [_]?u8{null} ** pp.len;             // mapping for stg to label 
     comptime var nodesLen = pp.len;                         // number of nodes for the pipe
@@ -509,7 +420,7 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
                         unreachable;    // illegal ._ at start of stage Tuple
                 }
             }
-        }
+        }                                                   // map stage to label
         inline for (pp) |stg, i| {
             if (@typeInfo(@TypeOf(stg[0])) == .EnumLiteral and stg[0] != ._) {
                 for (labels) |lbl, j| {
@@ -521,7 +432,7 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
     }  
 
     comptime var arg_set: []const type = &[_]type{};        // build tuple of types for stage Fn and Args
-    inline for (pp) |stg, i| {                              // fill in the args
+    inline for (pp) |stg, i| {                              // fill in the args types
         comptime var flag: bool = true;
         inline for (stg) |elem| {
             const E = @typeInfo(@TypeOf(elem));           
@@ -538,10 +449,10 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
             arg_set = arg_set ++ &[_]type{std.meta.Tuple(&[_]type{void})};  
     }
 
-    return struct {
+    return struct {                 // return an instance of ThisPipe
         const Stage = T;            // the StageType
         const Conn = Stage.Conn;    // list of connections
-        const thePipe = @This();    // the pipeInstance
+        const ThisPipe = @This();   // this pipe's type
         const pipe = pp;            // the pipe source tuple
 
         // stages/filter of the pipe
@@ -552,12 +463,12 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
         
 // associate the args with the stage's filters and a context struct.  Returns an arg_tuple
 
-        fn args(self: *thePipe, context: anytype) std.meta.Tuple(arg_set) {
+        fn args(self: *ThisPipe, context: anytype) std.meta.Tuple(arg_set) {
         
             //tuple for calling fn(s) allong with the arguement tuples reguired
             var tuple: std.meta.Tuple(arg_set) = undefined;
 
-            // fill in the tuple adding the fn(s) and argument values, using the passed contect structure block
+            // fill in the args tuple adding the fn(s) and argument values, using the passed contect structure block
             inline for (pipe) |stg, i| {
                 comptime var flag: bool = true;
                 inline for (stg) |elem, j| {
@@ -583,7 +494,8 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
                                         // this would be much simpiler if runtime vars worked in nested tuples...
                                         
                                         if (@TypeOf(tuple[i][1][k+1]) == []const u8) {              // tuple expects a string
-                                            tuple[i][1][k+1]=arg;                                       
+                                            tuple[i][1][k+1]=arg; 
+                                            
                                         } else if (context != void) comptime {                                            
                                             // use the type of the args tuple to decide what we are pointing too
                                             switch (@typeInfo(@TypeOf(tuple[i][1][k+1]))) {
@@ -642,9 +554,9 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
 
 // setup the pipe structs.  Only call once per PipeInstances.  An allocator is requied for the needed storage.
 
-        pub fn setup(allocator: *std.mem.Allocator) *thePipe {
+        pub fn init(allocator: *std.mem.Allocator) *ThisPipe {
         
-            var self: *thePipe = allocator.create(thePipe) catch unreachable;
+            var self: *ThisPipe = allocator.create(ThisPipe) catch unreachable;
 
             var p = self.p[0..]; // simipify life using slices
             var nodes = self.nodes[0..];
@@ -749,7 +661,7 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
 
 // run the pipe, you can repeat runs with different arg_tuple(s) without redoing setup.
 
-        pub fn run(self: *thePipe, context:anytype) !void {
+        pub fn run(self: *ThisPipe, context:anytype) !void {
         
             const tuple = self.args(context);
             var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -803,8 +715,8 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
                     }
 
                     
-                    // dispatch a pending peekto or readto
-                    if (c == c.dst.inC and (c.dst.state == .peekto or c.dst.state == .readto) and c.in != .ok and c.dst.commit == commit) {
+                    // dispatch a pending peekTo or readTo
+                    if (c == c.dst.inC and (c.dst.state == .peekTo or c.dst.state == .readTo) and c.in != .ok and c.dst.commit == commit) {
                         if (debugLoop) {
                             if (state == 2)
                                 loop += 1
@@ -926,111 +838,4 @@ pub fn PipeInstance(comptime T: type, pp: anytype) type {
             return;
         }
     };
-}
-
-// two context structs (must be pub for cross file access)
-pub const x = struct {
-    pub var xxx: u16 = 5;
-    pub var aaa: u16 = 100;
-    pub var ar = [_]u64{ 11, 22, 33, 44 };
-    pub var sss: []u64 = ar[0..];
-};
-
-
-pub var testme:u64 = 50;
-
-pub fn main() !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const allocator = &arena.allocator;
-
-    x.aaa += 3;
-
-    // create pipe commands and stages for type u128
-    const uP = StageType(.{u64, *[]u64});
-    const f = Filters(uP,u64);
-    
-    //var xxx:u64 = 75;
-    
-    // a sample pipe using uP stages, note that ._ indicates stage or connector's output is not connected
-    const pipe = .{ 
-        .{ f.gen, .{"aaa"} },           // generate a steam of numbers and pass each to the next stage
-        .{ .a, f.exactdiv, .{"xxx"}},   // exact goes to fanin, otherwise to exactdiv(7) via .a
-        .{ .b, f.fanin },               // take input from any stream and pass it to console
-        .{ f.console, ._ },             // output to console
-        .{ .a },
-        .{ .c, f.exactdiv, .{7}},       // exact goes via label .b to fanin, otherwise to exactdiv(22) via .c
-        .{ .b, ._ },
-        .{ .c },
-        .{ f.exactdiv, .{11}},          // exact goes via label b to fanint, otherwise ignore number
-        .{ .b, ._ },
-    };
-    
-    // play with a vars
-    x.xxx += 1;
-    x.aaa += 7;
-
-    // create a container for this pipe with type uP and setup the pipe's structure
-    var myPipe = PipeInstance(f.S, pipe).setup(allocator);
-
-    // run the pipe with the above args
-    try myPipe.run(x);
-
-    std.debug.print("\n", .{});
-
-    x.aaa = 50;
-    x.xxx = 13;
-
-    // run again with updated args
-    try myPipe.run(x);
-    
-    std.debug.print("\n", .{});
-   
-   const y = struct {
-    pub var xxx: u16 = 17;      // must be pub
-    pub var aaa: u16 = 80;
-    };
-
-    // and using a different context structure
-    try myPipe.run(y);
-    
-    const pSlicer = .{
-        .{ f.slice, .{"sss"} },    // extract elements of slice sss and pass to console
-        .{ f.console, ._ },
-    };
-    
-    std.debug.print("\n", .{});
-    
-    var sPiper = PipeInstance(uP, pSlicer).setup(allocator);
-    try sPiper.run(x);
-    
-    // const g = Filters(uP, *[]u64);      // for later
-    const pSlicew = .{
-        .{ f.gen, .{"ar.len"} },
-        .{ f.slice, .{"sss"}, ._ },    // update slice with generated values
-    };
-    
-    std.debug.print("\n", .{});
-    
-    var sPipew = PipeInstance(uP, pSlicew).setup(allocator);
-    
-    // update the slice
-    try sPipew.run(x);
-    
-    // output the updated slice
-    try sPiper.run(x);
-    
-    const root =  @import("root");
-    _ = root;
-    //pub var testme:u64 = 20;
-    _ = testme;
-    const pNoContect = .{
-        .{ f.gen, .{"testme"} },
-        .{ f.console, ._ },    // update slice with generated values
-    };
-    
-    try PipeInstance(uP, pNoContect).setup(allocator).run(@This());
-    
-    std.debug.print("\n", .{});
-    
-}    
+}  
