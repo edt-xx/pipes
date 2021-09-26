@@ -6,7 +6,7 @@ Here we have a filter (co-routine) call gen which gets started with a argument o
 
 We add multiple connections using labels.  Lets look at an example:
 ```
-const pipe = .{ 
+const aPipe = .{ 
         .{ gen, .{30} },              // generate a steam of numbers and pass each to the next stage
         .{ .a, exactdiv, .{5}},       // exact goes to fanin, otherwise to exactdiv(7) via .a
         .{ .b, fanin },               // take input from any stream and pass it to console
@@ -20,13 +20,20 @@ Here we generate integers from 0 to 29 and pass them to the exactdiv filter.  Th
 
 Of course zig is heavily typed.  So its not as simple to call a pipe as it is in CMS Pipelines.  So here is a real example.  First we setup a struct to contain variables to be read by the pipe.  Then we tell the pipe that we are going to use type u64 or i64 (uP) and create a instance of the filters using u64 (f).  Next comes the pipe definition as above using the (f.) prefix.  The last statement creates a PipeInstance with the StageType uP for our pipe, sets it up with an allocator, and runs it passing the context struct.   The results will be the same as above.
 ```
+const std = @import("std");
+
+const pipe = @import("pipes");
+const sys = @import("filters");
+
 const context = struct {
     pub var xxx: u16 = 5;
     pub var aaa: u16 = 30;
 };
-const uP = StageType(.{u64, i64});
-const f = Filters(uP,u64);
-const pipe = .{ 
+
+const uP = pipe.StageType(.{u64, i64});
+const f = sys.Filters(uP,u64);
+
+const aPipe = .{ 
         .{ f.gen, .{"aaa"} },           // generate a steam of numbers and pass each to the next stage
         .{ .a, f.exactdiv, .{"xxx"}},   // exact goes to fanin, otherwise to exactdiv(7) via .a
         .{ .b, f.fanin },               // take input from any stream and pass it to console
@@ -34,12 +41,12 @@ const pipe = .{
         .{ .a },
         .{ .c, f.exactdiv, .{7}},       // exact goes via label .b to fanin
         .{ .b, ._ },
-};  
-try PipeInstance(uP, pipe).setup(allocator).myPipe.run(context);
+};
+
+try Make(uP, aPipe).init(allocator).run(context);
 ```
+Zig imposes constraints.  To create pipes within these limits requires a bit of work.  We need to define what gets passed on connections.  The connection structure (Conn) must be runtime so it cannot use anytype.  Since we will want to send different types thru the same connections I created the TypeUnion struct (tagged Unions did not quite fit).   The StageType defines the types required for Connections and the TypeUnion they use.  We cannot use std.meta.ArgsTuple with generic functions.  This, and the lack of function name overloading (not a bad thing) is what triggers the requirement to setup Filters.  To process variables in pipes @field is used.  This requires a struct with pub variables.  Alternately you can use pub global vars and @This() for context.   pope.Make returns a type so the init function is need to create the an instance which cannot be allocated on the stack so an allocator is needed.
 
-Zig imposes constraints.  To create pipes within these limits requires a bit of work.  We need to define what gets passed on connections.  The connection structure (Conn) must be runtime so it cannot use anytype.  Since we will want to send different types thru the same connections I created the TypeUnion struct (tagged Unions did not quite fit).   The StageType defines the types required for Connections and the TypeUnion they use.  We cannot use std.meta.ArgsTuple with generic functions.  This, and the lack of function name overloading (not a bad thing) is what triggers the requirement to setup Filters.  To process variables in pipes @field is used.  This requires a struct with pub variables.  Alternately you can use pub global vars and @This() for context.   PipeInstance returns a type so the setup function is need to create the an instance which cannot be allocated on the stack so an allocator is needed.   
-
-The PipeInstance args function also gets complicated due to known problems with runtime values in multilevel tuples in Stage 1.
+The pipe.Make args function also gets complicated due to known problems with runtime values in multilevel tuples in Stage 1.
 
 Does this Help?  What questions does it raise?
