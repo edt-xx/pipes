@@ -3,7 +3,7 @@ const std = @import("std");
 const build_options = @import("build_options");
 const debugDisp = build_options.debugDisp;
 const debugLoop = build_options.debugLoop;
-const debugStages = build_options.debugStages;
+const debugStageTypes = build_options.debugStageTypes;
 const debugCmd = build_options.debugCmd;
 const debugStart = build_options.debugStart;
 
@@ -42,9 +42,9 @@ const Message = enum(u2) {
 //     };
 // }
     
-// we use TypeUnion to store the values passed between stages.  We define the StageType by passing a tuple of types with
+// we use TypeUnion to store the values passed between stages.  We define the Stage by passing a tuple of types with
 // the types valid to use in the pipe's TypeUnion(s).  We use Filters to create non generic versions of the filter functions 
-// with specific types, validating that the types are valid for the StageType.
+// with specific types, validating that the types are valid for the Stage.
     
 pub fn TypeUnion(comptime list: anytype) type {     // list is atuple of the types in this typeUnion
 
@@ -182,13 +182,13 @@ pub fn ConnType(comptime S: type, comptime TU: type) type {
 // Used to create a type for stages that can be used with any of the types in the list, which needs to be a tuple of types.
 // A stage is defined as a filter, its args and connections
 
-pub fn StageType(list: anytype) type {
+pub fn Stage(list: anytype) type {
 
     return struct {
     
-        pub const Stage = @This();
+        pub const StageType = @This();
         pub const TU = TypeUnion(list);
-        pub const Conn = ConnType(Stage, TU);
+        pub const Conn = ConnType(StageType, TU);
 
         outC: ?*Conn = null,
         inC: ?*Conn = null,
@@ -204,7 +204,7 @@ pub fn StageType(list: anytype) type {
         
 // these are the commands that can be used inside filters.  Filters defines what a pipe stage does.        
    
-        pub fn typeTo(self: *Stage, comptime T:type) !bool {
+        pub fn typeTo(self: *StageType, comptime T:type) !bool {
             if (debugCmd) std.log.info("peekTo {*} inC {*}\n", .{ self, self.inC });
             if (self.inC) |c| {
                 if (debugCmd) std.log.info("peekTo {*} in {} {}\n", .{ c, c.in, c.data });
@@ -227,7 +227,7 @@ pub fn StageType(list: anytype) type {
             return error.noInStream;
         }   
    
-        pub fn peekTo(self: *Stage, comptime T:type) !T {
+        pub fn peekTo(self: *StageType, comptime T:type) !T {
             if (debugCmd) std.log.info("peekTo {*} inC {*}\n", .{ self, self.inC });
             if (self.inC) |c| {
                 if (debugCmd) std.log.info("peekTo {*} in {} {}\n", .{ c, c.in, c.data });
@@ -250,7 +250,7 @@ pub fn StageType(list: anytype) type {
             return error.noInStream;
         }
 
-        pub fn readTo(self: *Stage, comptime T: type) !T {
+        pub fn readTo(self: *StageType, comptime T: type) !T {
             if (self.inC) |c| {
                 while (c.in == .ok) {
                     suspend {
@@ -271,7 +271,7 @@ pub fn StageType(list: anytype) type {
             return error.noInStream;
         }
 
-        pub fn output(self: *Stage, v: anytype) !void {
+        pub fn output(self: *StageType, v: anytype) !void {
             if (self.outC) |c| {
                 while (c.in == .data) {
                     suspend {
@@ -295,27 +295,27 @@ pub fn StageType(list: anytype) type {
             return error.noOutStream;
         }
 
-        pub fn selectOutput(self: *Stage, o: usize) !void {
+        pub fn selectOutput(self: *StageType, o: usize) !void {
             return self.setoutC(o);
         }
 
-        pub fn severOutput(self: *Stage) !void {
+        pub fn severOutput(self: *StageType) !void {
             if (self.outC) |_| {
                 self.outC = null;
             } else return error.noOutStream;
         }
 
-        pub fn severInput(self: *Stage) !void {
+        pub fn severInput(self: *StageType) !void {
             if (self.inC) |_| {
                 self.inC = null;
             } else return error.noOutStream;
         }
 
-        pub fn selectInput(self: *Stage, i: usize) !void {
+        pub fn selectInput(self: *StageType, i: usize) !void {
             return self.setinC(i);
         }
 
-        pub fn selectAnyInput(self: *Stage) !usize {
+        pub fn selectAnyInput(self: *StageType) !usize {
             // std.log.info("anyin {*} inC {*}\n",.{self, self.inC});
             if (countInstreams(self) > 0) {
                 // std.log.info("anyin {}", .{countInstreams(self)});
@@ -341,7 +341,7 @@ pub fn StageType(list: anytype) type {
             return error.noInStream;
         }
 
-        pub fn endStage(self: *Stage) void {
+        pub fn endStage(self: *StageType) void {
             for (self.n) |*c| {
                 if (c.dst == self) {
                     self.inC = null;
@@ -353,7 +353,7 @@ pub fn StageType(list: anytype) type {
             return;
         }
 
-        fn setinC(self: *Stage, i: usize) !void {
+        fn setinC(self: *StageType, i: usize) !void {
             for (self.n) |*c| {
                 if (c.dst == self and c.sin == i) {
                     self.inC = c;
@@ -364,7 +364,7 @@ pub fn StageType(list: anytype) type {
             return error.noInStream;
         }
 
-        pub fn countInstreams(self: *Stage) usize {
+        pub fn countInstreams(self: *StageType) usize {
             var count: usize = 0;
             for (self.n) |c| {
                 if (c.dst == self and (c.in == .data or c.src.outC != null))
@@ -373,7 +373,7 @@ pub fn StageType(list: anytype) type {
             return count;
         }
 
-        fn setoutC(self: *Stage, o: usize) !void {
+        fn setoutC(self: *StageType, o: usize) !void {
             for (self.n) |*c| {
                 if (c.src == self and c.sout == o) {
                     self.outC = c;
@@ -387,11 +387,11 @@ pub fn StageType(list: anytype) type {
     };
 }
             
-// Once we have defined the StageType & Filters types, we need to use a pipe tuple and prepare to run it using a 
+// Once we have defined the Stage & Filters types, we need to use a pipe tuple and prepare to run it using a 
 // PipeInstance.  The PipeInstances is used to set the args for a pipe using struct(s) as context blocks.  Any required 
 // args are set, the run funcion should be called to execute the pipe.
 
-pub fn Make(comptime T: type, pp: anytype) type {
+pub fn Mint(comptime T: type, pp: anytype) type {
 
     comptime var lmap = [_]?u8{null} ** pp.len;             // mapping for stg to label 
     comptime var nodesLen = pp.len;                         // number of nodes for the pipe
@@ -450,16 +450,16 @@ pub fn Make(comptime T: type, pp: anytype) type {
     }
 
     return struct {                 // return an instance of ThisPipe
-        const Stage = T;            // the StageType
-        const Conn = Stage.Conn;    // list of connections
+        const StageType = T;            // the Stage
+        const Conn = StageType.Conn;    // list of connections
         const ThisPipe = @This();   // this pipe's type
         const pipe = pp;            // the pipe source tuple
 
         // stages/filter of the pipe
-        p: [pipe.len]Stage = [_]Stage{undefined} ** pipe.len,
+        p: [pipe.len]StageType = [_]StageType{undefined} ** pipe.len,
 
         // connection nodes
-        nodes: [nodesLen]Conn = [_]Stage.Conn{undefined} ** nodesLen,
+        nodes: [nodesLen]Conn = [_]StageType.Conn{undefined} ** nodesLen,
         
 // associate the args with the stage's filters and a context struct.  Returns an arg_tuple
 
@@ -562,15 +562,15 @@ pub fn Make(comptime T: type, pp: anytype) type {
             var nodes = self.nodes[0..];
 
             inline for (pipe) |stg, i| {
-                p[i] = Stage{ .i = i, .allocator = allocator };     // ensure default values are set
+                p[i] = StageType{ .i = i, .allocator = allocator };     // ensure default values are set
 
                 inline for (stg) |elem, j | {                       // parse the pipe
                     switch (@typeInfo(@TypeOf(elem))) {
                         .Fn, .BoundFn => { // fn....
                             var name = @typeName(@TypeOf(elem));
-                            const one = std.mem.indexOfPos(u8, name, 0, @typeName(Stage)).?;
-                            const two = std.mem.indexOfPos(u8, name, one+@typeName(Stage).len+1, @typeName(Stage)).?;
-                            const start = std.mem.indexOfPos(u8, name, two+@typeName(Stage).len+1, ")").?;
+                            const one = std.mem.indexOfPos(u8, name, 0, @typeName(StageType)).?;
+                            const two = std.mem.indexOfPos(u8, name, one+@typeName(StageType).len+1, @typeName(StageType)).?;
+                            const start = std.mem.indexOfPos(u8, name, two+@typeName(StageType).len+1, ")").?;
                             const end = std.mem.indexOfPos(u8, name, start+1, ")).").?;
                             p[i].name = name[start+2 .. end];
                             if (debugStart) std.debug.print("stg {} {s}\n", .{i, p[i].name});
@@ -829,7 +829,7 @@ pub fn Make(comptime T: type, pp: anytype) type {
             }
 
             if (debugStart) {
-                std.debug.print("\n{}\n", .{Stage});
+                std.debug.print("\n{}\n", .{StageType});
                 for (nodes) |*c| {
                     std.debug.print("start {*} src {}_{s} {} {*} {} {} dst {}_{s} {} {*} {} {} in {} {}\n", .{ c, c.src.i, c.src.name, c.sout, c.src.outC, c.src.state, c.src.commit, c.dst.i, c.dst.name, c.sin, c.dst.inC, c.dst.state, c.dst.commit, c.in, c.data });
                 }

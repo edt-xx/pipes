@@ -11,13 +11,13 @@ const debugStart = build_options.debugStart;
 // that are not generic.  We do not have the functions in StageType since we generate the args for the functions via
 // PipeInstance.args and can set the first arg of the non generic filter function to the StageType used by the pipe.  
 
-pub fn Filters(comptime Stage:type, comptime T:type) type {
+pub fn Filters(comptime StageType:type, comptime T:type) type {
 
-    std.debug.assert(Stage.TU.inUnion(T)); 
+    std.debug.assert(StageType.TU.inUnion(T)); 
     
     return struct {
     
-        pub const S = Stage; 
+        pub const S = StageType; 
         
 // we need to return the global error set. When used, the fn type includes the name of the function.  We use this
 // to set the name of the stage... 

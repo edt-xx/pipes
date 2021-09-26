@@ -22,7 +22,7 @@ pub fn main() !void {
     x.aaa += 3;
 
     // create pipe commands and stages for type u128
-    const uP = pipe.StageType(.{u64, *[]u64});
+    const uP = pipe.Stage(.{u64, *[]u64});
     const f = sys.Filters(uP,u64);
     
     //var xxx:u64 = 75;
@@ -46,7 +46,7 @@ pub fn main() !void {
     x.aaa += 7;
 
     // create a container for this pipe with type uP and setup the pipe's structure
-    var myPipe = pipe.Make(f.S, aPipe).init(allocator);
+    var myPipe = pipe.Mint(f.S, aPipe).init(allocator);
 
     // run the pipe with the above args
     try myPipe.run(x);
@@ -76,7 +76,7 @@ pub fn main() !void {
     
     std.debug.print("\n", .{});
     
-    var sPiper = pipe.Make(uP, pSlicer).init(allocator);
+    var sPiper = pipe.Mint(uP, pSlicer).init(allocator);
     try sPiper.run(x);
     
     // const g = Filters(uP, *[]u64);      // for later
@@ -87,7 +87,7 @@ pub fn main() !void {
     
     std.debug.print("\n", .{});
     
-    var sPipew = pipe.Make(uP, pSlicew).init(allocator);
+    var sPipew = pipe.Mint(uP, pSlicew).init(allocator);
     
     // update the slice
     try sPipew.run(x);
@@ -101,7 +101,7 @@ pub fn main() !void {
         .{ f.console, ._ },    // update slice with generated values
     };
     
-    try pipe.Make(uP, pNoContect).init(allocator).run(@This());
+    try pipe.Mint(uP, pNoContect).init(allocator).run(@This());
     
     std.debug.print("\n", .{});
     
