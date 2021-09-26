@@ -1,4 +1,4 @@
-So what are pipes?  They are a set of co-routines that pass values via connections.  In the simplest case case there is only one connection.  An example, ignoring types for now:
+So what are pipes?  They are a set of co-routines that pass values via connections.  In the simplest case there is only one connection.  An example, ignoring types for now:
 ```
 const simplePipe = .{ .{gen, .{100}},  .{console, ._}}
 ```
