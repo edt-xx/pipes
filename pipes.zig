@@ -41,92 +41,93 @@ const Message = enum(u2) {
 //         else => unreachable,
 //     };
 // }
-    
-// we use TypeUnion to store the values passed between stages.  We define the Stage by passing a tuple of types with
-// the types valid to use in the pipe's TypeUnion(s).  We use Filters to create non generic versions of the filter functions 
-// with specific types, validating that the types are valid for the Stage.
-    
-pub fn TypeUnion(comptime list: anytype) type {     // list is atuple of the types in this typeUnion
 
-    const info = @typeInfo(@TypeOf(list));          // validate list is a tuple
+// we use TypeUnion to store the values passed between stages.  We define the Stage by passing a tuple of types with
+// the types valid to use in the pipe's TypeUnion(s).  We use Filters to create non generic versions of the filter functions
+// with specific types, validating that the types are valid for the Stage.
+
+pub fn TypeUnion(comptime list: anytype) type { // list is atuple of the types in this typeUnion
+
+    const info = @typeInfo(@TypeOf(list)); // validate list is a tuple
     if (info != .Struct)
-            @compileError("Expected struct type");
+        @compileError("Expected struct type");
     if (!info.Struct.is_tuple)
-            @compileError("Struct type must be a tuple type");
+        @compileError("Struct type must be a tuple type");
 
     // define the typedUnion's enum (ESet) based on std.meta.FieldEnum
-    comptime var s=0;
-    comptime var a=0;
+    comptime var s = 0;
+    comptime var a = 0;
     comptime var enumFields: [list.len]std.builtin.TypeInfo.EnumField = undefined;
     comptime var decls = [_]std.builtin.TypeInfo.Declaration{};
     inline for (list) |T, i| {
-        std.debug.assert(@TypeOf(T) == type);       // validate list entry is a type
+        std.debug.assert(@TypeOf(T) == type); // validate list entry is a type
         enumFields[i].name = @typeName(T);
         enumFields[i].value = i;
-        if (@sizeOf(T) > s) s = @sizeOf(T);         // track size and alignment needed to store the value
+        if (@sizeOf(T) > s) s = @sizeOf(T); // track size and alignment needed to store the value
         if (@alignOf(T) > a) a = @alignOf(T);
     }
-    
-    const TSet = @Type( .{ .Enum = .{               // create the enum type 
+
+    const TSet = @Type(.{
+        .Enum = .{ // create the enum type
             .layout = .Auto,
-            .tag_type = std.math.IntFittingRange(0, list.len-1),
+            .tag_type = std.math.IntFittingRange(0, list.len - 1),
             .fields = &enumFields,
             .decls = &decls,
             .is_exhaustive = true,
-            }
-        });
-    
+        },
+    });
+
     return struct {
         pub const TU = @This();
-        
+
         // create buffer for the value with correct alignment and size for the included types
-        value: [s]u8 align(a) = [_]u8{undefined} ** s, 
-        type: TSet = undefined,      
+        value: [s]u8 align(a) = [_]u8{undefined} ** s,
+        type: TSet = undefined,
 
         // convert an ESet literal to the corresponding type (if t is runtime we get an error)
         pub fn TypeOf(comptime e: TSet) type {
             return list[@enumToInt(e)];
         }
-        
-        pub fn getType(self:*TU) @TypeOf(._) {
+
+        pub fn getType(self: *TU) @TypeOf(._) {
             return self.type;
         }
 
-        pub fn put(self:*TU, v:anytype) void {
+        pub fn put(self: *TU, v: anytype) void {
             if (@TypeOf(v) == TU) {
-                std.mem.copy(u8,&self.value,&v.value);
+                std.mem.copy(u8, &self.value, &v.value);
                 self.type = v.type;
                 return;
-            } 
+            }
             inline for (list) |T, i| {
-                if (T==@TypeOf(v)) {
-                    @ptrCast(*T,&self.value).* = v; 
-                    self.type =  @intToEnum(TSet,i);
+                if (T == @TypeOf(v)) {
+                    @ptrCast(*T, &self.value).* = v;
+                    self.type = @intToEnum(TSet, i);
                     return;
                 }
             }
-            std.debug.print("put: type {} not in TypeUnion {}\n",.{@TypeOf(v),TU});
-            unreachable;    
+            std.debug.print("put: type {} not in TypeUnion {}\n", .{ @TypeOf(v), TU });
+            unreachable;
         }
-        
+
         // return the value of typeUnion - validate that stored and requested types match.
-        pub fn get(self:*TU, comptime T:type) T {
+        pub fn get(self: *TU, comptime T: type) T {
             if (T == TU)
                 return self.*;
             inline for (list) |U, i| {
                 if (i == @enumToInt(self.type)) {
-                    if (T==U) 
-                        return @ptrCast(*T,&self.value).*;                    
-                    std.debug.print("get: Union {} expected type {} found {}\n",.{list, U, T});
-                    unreachable;                 
+                    if (T == U)
+                        return @ptrCast(*T, &self.value).*;
+                    std.debug.print("get: Union {} expected type {} found {}\n", .{ list, U, T });
+                    unreachable;
                 }
-            } 
-            std.debug.print("get: Union {} instance not initialized\n",.{list});
-            unreachable;    
+            }
+            std.debug.print("get: Union {} instance not initialized\n", .{list});
+            unreachable;
         }
 
         // test if type is in typeUnion
-        pub fn inUnion(comptime T:type) bool { 
+        pub fn inUnion(comptime T: type) bool {
             inline for (list) |U| {
                 if (T == U)
                     return true;
@@ -135,25 +136,22 @@ pub fn TypeUnion(comptime list: anytype) type {     // list is atuple of the typ
         }
 
         // check if the typeUnion contains a value of type
-        pub fn typeIs(self:TU, comptime T:type) bool {
+        pub fn typeIs(self: TU, comptime T: type) bool {
             inline for (list) |U, i| {
                 if (i == @enumToInt(self.type)) {
-                    if (T==U)
+                    if (T == U)
                         return true;
                 }
             }
             return false;
         }
-
     };
-}    
+}
 
 // This is used to define the connections between stages (and pipes)
 
 pub fn ConnType(comptime S: type, comptime TU: type) type {
-
     return struct {
-    
         pub const Conn = @This();
 
         src: *S = undefined, // used by output
@@ -183,9 +181,7 @@ pub fn ConnType(comptime S: type, comptime TU: type) type {
 // A stage is defined as a filter, its args and connections
 
 pub fn Stage(list: anytype) type {
-
     return struct {
-    
         pub const StageType = @This();
         pub const TU = TypeUnion(list);
         pub const Conn = ConnType(StageType, TU);
@@ -199,12 +195,12 @@ pub fn Stage(list: anytype) type {
         n: []Conn = undefined,
         name: ?[]const u8 = null,
         end: bool = false,
-        i: usize = undefined, 
+        i: usize = undefined,
         allocator: *std.mem.Allocator = undefined,
-        
-// these are the commands that can be used inside filters.  Filters defines what a pipe stage does.        
-   
-        pub fn typeTo(self: *StageType, comptime T:type) !bool {
+
+        // these are the commands that can be used inside filters.  Filters defines what a pipe stage does.
+
+        pub fn typeTo(self: *StageType, comptime T: type) !bool {
             if (debugCmd) std.log.info("peekTo {*} inC {*}\n", .{ self, self.inC });
             if (self.inC) |c| {
                 if (debugCmd) std.log.info("peekTo {*} in {} {}\n", .{ c, c.in, c.data });
@@ -225,9 +221,9 @@ pub fn Stage(list: anytype) type {
                 }
             }
             return error.noInStream;
-        }   
-   
-        pub fn peekTo(self: *StageType, comptime T:type) !T {
+        }
+
+        pub fn peekTo(self: *StageType, comptime T: type) !T {
             if (debugCmd) std.log.info("peekTo {*} inC {*}\n", .{ self, self.inC });
             if (self.inC) |c| {
                 if (debugCmd) std.log.info("peekTo {*} in {} {}\n", .{ c, c.in, c.data });
@@ -383,59 +379,57 @@ pub fn Stage(list: anytype) type {
             self.outC = null;
             return error.noOutStream;
         }
-    
     };
 }
-            
-// Once we have defined the Stage & Filters types, we need to use a pipe tuple and prepare to run it using a 
-// PipeInstance.  The PipeInstances is used to set the args for a pipe using struct(s) as context blocks.  Any required 
+
+// Once we have defined the Stage & Filters types, we need to use a pipe tuple and prepare to run it using a
+// PipeInstance.  The PipeInstances is used to set the args for a pipe using struct(s) as context blocks.  Any required
 // args are set, the run funcion should be called to execute the pipe.
 
 pub fn Mint(comptime T: type, pp: anytype) type {
-
-    comptime var lmap = [_]?u8{null} ** pp.len;             // mapping for stg to label 
-    comptime var nodesLen = pp.len;                         // number of nodes for the pipe
-    comptime var labels:std.meta.Tuple(                     // list of enum literals type for labels
+    comptime var lmap = [_]?u8{null} ** pp.len; // mapping for stg to label
+    comptime var nodesLen = pp.len; // number of nodes for the pipe
+    comptime var labels: std.meta.Tuple( // list of enum literals type for labels
         list: {
-            comptime var l: []const type = &[_]type {};
-            inline for (pp) |stg| {
-                if (@typeInfo(@TypeOf(stg[0])) == .EnumLiteral and stg.len>1 and @typeInfo(@TypeOf(stg[1])) != .EnumLiteral) {
-                    l = l ++ &[_]type{@TypeOf(stg[0])};
-                }
-            }
-            break :list l;                                  // return tuple of enum literal types, to create labels tuple
-        } ) = undefined;
-    {                                                       // context block - we want to use k later in runtime
-        comptime var k = 0;                                 // save enum literals in the labels tuple
+        comptime var l: []const type = &[_]type{};
         inline for (pp) |stg| {
-            if (@typeInfo(@TypeOf(stg[0])) == .EnumLiteral and stg.len>1 and @typeInfo(@TypeOf(stg[1])) != .EnumLiteral) {
+            if (@typeInfo(@TypeOf(stg[0])) == .EnumLiteral and stg.len > 1 and @typeInfo(@TypeOf(stg[1])) != .EnumLiteral) {
+                l = l ++ &[_]type{@TypeOf(stg[0])};
+            }
+        }
+        break :list l; // return tuple of enum literal types, to create labels tuple
+    }) = undefined;
+    { // context block - we want to use k later in runtime
+        comptime var k = 0; // save enum literals in the labels tuple
+        inline for (pp) |stg| {
+            if (@typeInfo(@TypeOf(stg[0])) == .EnumLiteral and stg.len > 1 and @typeInfo(@TypeOf(stg[1])) != .EnumLiteral) {
                 labels[k] = stg[0];
                 k += 1;
-            }                                               // nodesLen may need adjustment with addpipe/callpipe
+            } // nodesLen may need adjustment with addpipe/callpipe
             inline for (stg) |elem, j| {
                 if (@typeInfo(@TypeOf(elem)) == .EnumLiteral and elem == ._) {
-                    if (j>0) 
+                    if (j > 0)
                         nodesLen -= 1
                     else
-                        unreachable;    // illegal ._ at start of stage Tuple
+                        unreachable; // illegal ._ at start of stage Tuple
                 }
             }
-        }                                                   // map stage to label
+        } // map stage to label
         inline for (pp) |stg, i| {
             if (@typeInfo(@TypeOf(stg[0])) == .EnumLiteral and stg[0] != ._) {
                 for (labels) |lbl, j| {
                     if (stg[0] == lbl)
-                        lmap[i] = j;                        // save the mapping
+                        lmap[i] = j; // save the mapping
                 }
             }
         }
-    }  
+    }
 
-    comptime var arg_set: []const type = &[_]type{};        // build tuple of types for stage Fn and Args
-    inline for (pp) |stg, i| {                              // fill in the args types
+    comptime var arg_set: []const type = &[_]type{}; // build tuple of types for stage Fn and Args
+    inline for (pp) |stg, i| { // fill in the args types
         comptime var flag: bool = true;
         inline for (stg) |elem| {
-            const E = @typeInfo(@TypeOf(elem));           
+            const E = @typeInfo(@TypeOf(elem));
             switch (E) {
                 .Fn, .BoundFn => {
                     if (debugStart) std.debug.print("fn {} {}\n", .{ i, elem });
@@ -446,25 +440,25 @@ pub fn Mint(comptime T: type, pp: anytype) type {
             }
         }
         if (flag)
-            arg_set = arg_set ++ &[_]type{std.meta.Tuple(&[_]type{void})};  
+            arg_set = arg_set ++ &[_]type{std.meta.Tuple(&[_]type{void})};
     }
 
-    return struct {                 // return an instance of ThisPipe
-        const StageType = T;            // the Stage
-        const Conn = StageType.Conn;    // list of connections
-        const ThisPipe = @This();   // this pipe's type
-        const pipe = pp;            // the pipe source tuple
+    return struct { // return an instance of ThisPipe
+        const StageType = T; // the Stage
+        const Conn = StageType.Conn; // list of connections
+        const ThisPipe = @This(); // this pipe's type
+        const pipe = pp; // the pipe source tuple
 
         // stages/filter of the pipe
         p: [pipe.len]StageType = [_]StageType{undefined} ** pipe.len,
 
         // connection nodes
         nodes: [nodesLen]Conn = [_]StageType.Conn{undefined} ** nodesLen,
-        
-// associate the args with the stage's filters and a context struct.  Returns an arg_tuple
+
+        // associate the args with the stage's filters and a context struct.  Returns an arg_tuple
 
         fn args(self: *ThisPipe, context: anytype) std.meta.Tuple(arg_set) {
-        
+
             //tuple for calling fn(s) allong with the arguement tuples reguired
             var tuple: std.meta.Tuple(arg_set) = undefined;
 
@@ -484,34 +478,33 @@ pub fn Mint(comptime T: type, pp: anytype) type {
                                 //@compileLog(@typeInfo(@TypeOf(tuple[i][1][k+1])));
                                 //@compileLog(arg);
                                 switch (@typeInfo(@TypeOf(arg))) {
-                                    .Int, .Float, .ComptimeInt, .ComptimeFloat => {                 // constants
+                                    .Int, .Float, .ComptimeInt, .ComptimeFloat => { // constants
                                         if (debugStart) std.debug.print("Int {} {}\n", .{ j, arg });
-                                        tuple[i][1][k+1] = arg;
+                                        tuple[i][1][k + 1] = arg;
                                     },
                                     .Pointer => { // string with a var, var.field or (use a slice, not an array)
                                         if (debugStart) std.debug.print("Ptr {} {s}\n", .{ j, arg });
-                                        
+
                                         // this would be much simpiler if runtime vars worked in nested tuples...
-                                        
-                                        if (@TypeOf(tuple[i][1][k+1]) == []const u8) {              // tuple expects a string
-                                            tuple[i][1][k+1]=arg; 
-                                            
-                                        } else if (context != void) comptime {                                            
+
+                                        if (@TypeOf(tuple[i][1][k + 1]) == []const u8) { // tuple expects a string
+                                            tuple[i][1][k + 1] = arg;
+                                        } else if (context != void) comptime {
                                             // use the type of the args tuple to decide what we are pointing too
-                                            switch (@typeInfo(@TypeOf(tuple[i][1][k+1]))) {
+                                            switch (@typeInfo(@TypeOf(tuple[i][1][k + 1]))) {
                                                 .Int, .Float => {
-                                                    if (std.mem.indexOfPos(u8, arg, 0, ".")) |dot|  // single level struct.field
-                                                        tuple[i][1][k+1] = @field(@field(context, arg[0..dot]), arg[dot+1..])
+                                                    if (std.mem.indexOfPos(u8, arg, 0, ".")) |dot| // single level struct.field
+                                                        tuple[i][1][k + 1] = @field(@field(context, arg[0..dot]), arg[dot + 1 ..])
                                                     else
-                                                        tuple[i][1][k+1] = @field(context, arg);
+                                                        tuple[i][1][k + 1] = @field(context, arg);
                                                 },
                                                 .Pointer => |p| {
                                                     switch (@typeInfo(p.child)) {
                                                         .Int, .Float, .Pointer, .Struct => {
-                                                            if (std.mem.indexOfPos(u8, arg, 0, ".")) |dot|  // single level 
-                                                                tuple[i][1][k+1]=&@field(@field(context,arg[0..dot]), arg[dot+1..])
-                                                            else 
-                                                                tuple[i][1][k+1]=&@field(context, arg);
+                                                            if (std.mem.indexOfPos(u8, arg, 0, ".")) |dot| // single level
+                                                                tuple[i][1][k + 1] = &@field(@field(context, arg[0..dot]), arg[dot + 1 ..])
+                                                            else
+                                                                tuple[i][1][k + 1] = &@field(context, arg);
                                                         },
                                                         else => {
                                                             @compileLog(p.child);
@@ -520,14 +513,14 @@ pub fn Mint(comptime T: type, pp: anytype) type {
                                                     }
                                                 },
                                                 else => {
-                                                    @compileLog(@TypeOf(tuple[i][1][k+1]));  // unsupported arg type
+                                                    @compileLog(@TypeOf(tuple[i][1][k + 1])); // unsupported arg type
                                                 },
                                             }
                                         };
                                     },
                                     // more types will be needed, depending on additional stages
                                     else => {
-                                        @compileLog(@TypeOf(arg));  // unsupported arg type
+                                        @compileLog(@TypeOf(arg)); // unsupported arg type
                                     },
                                 }
                             }
@@ -552,38 +545,37 @@ pub fn Mint(comptime T: type, pp: anytype) type {
             return tuple;
         }
 
-// setup the pipe structs.  Only call once per PipeInstances.  An allocator is requied for the needed storage.
+        // setup the pipe structs.  Only call once per PipeInstances.  An allocator is requied for the needed storage.
 
         pub fn init(allocator: *std.mem.Allocator) *ThisPipe {
-        
             var self: *ThisPipe = allocator.create(ThisPipe) catch unreachable;
 
             var p = self.p[0..]; // simipify life using slices
             var nodes = self.nodes[0..];
 
             inline for (pipe) |stg, i| {
-                p[i] = StageType{ .i = i, .allocator = allocator };     // ensure default values are set
+                p[i] = StageType{ .i = i, .allocator = allocator }; // ensure default values are set
 
-                inline for (stg) |elem, j | {                       // parse the pipe
+                inline for (stg) |elem, j| { // parse the pipe
                     switch (@typeInfo(@TypeOf(elem))) {
                         .Fn, .BoundFn => { // fn....
                             var name = @typeName(@TypeOf(elem));
                             const one = std.mem.indexOfPos(u8, name, 0, @typeName(StageType)).?;
-                            const two = std.mem.indexOfPos(u8, name, one+@typeName(StageType).len+1, @typeName(StageType)).?;
-                            const start = std.mem.indexOfPos(u8, name, two+@typeName(StageType).len+1, ")").?;
-                            const end = std.mem.indexOfPos(u8, name, start+1, ")).").?;
-                            p[i].name = name[start+2 .. end];
-                            if (debugStart) std.debug.print("stg {} {s}\n", .{i, p[i].name});
+                            const two = std.mem.indexOfPos(u8, name, one + @typeName(StageType).len + 1, @typeName(StageType)).?;
+                            const start = std.mem.indexOfPos(u8, name, two + @typeName(StageType).len + 1, ")").?;
+                            const end = std.mem.indexOfPos(u8, name, start + 1, ")).").?;
+                            p[i].name = name[start + 2 .. end];
+                            if (debugStart) std.debug.print("stg {} {s}\n", .{ i, p[i].name });
                         },
                         //.Pointer => { // *const u8...
                         //    if (debugStart) std.debug.print("label {} {s}\n", .{ i, elem });
                         //    p[i].label = elem;
                         //},
                         .EnumLiteral => { // label (.any) or end (._)
-                            if (j > 0 and elem == ._) {                     // j == 0 case caught by constructor
+                            if (j > 0 and elem == ._) { // j == 0 case caught by constructor
                                 p[i].end = true;
                                 if (debugStart) std.debug.print("end {}\n", .{i});
-                            }                             
+                            }
                         },
                         else => {},
                     }
@@ -594,21 +586,19 @@ pub fn Mint(comptime T: type, pp: anytype) type {
             // const buffalloc = &std.heap.FixedBufferAllocator.init(&buffer).allocator;
             // var map = std.hash_map.StringHashMap(Conn).init(buffalloc);
             // defer map.deinit();
-          
-            var map:[nodesLen]?Conn = undefined;
-            for (map) |*e| { e.* = null; }
+
+            var map: [nodesLen]?Conn = .{null} ** nodesLen;
 
             // create the pipe's nodes - all fields are initialized by .set or in .run so no Conn{} is needed
             var j: u32 = 0;
-            for (p) |item, i|  {
-                
+            for (p) |item, i| {
                 const stg = if (item.name) |_| true else false;
 
                 if (stg and !item.end) {
                     nodes[j].set(p, i, 0, i + 1, 0);
                     j += 1;
                 }
-                
+
                 if (lmap[i]) |lbl| {
                     if (map[lbl]) |*k| {
                         if (!stg) {
@@ -636,7 +626,7 @@ pub fn Mint(comptime T: type, pp: anytype) type {
             }
 
             // save the node slice in the stages;
-            for (p) | _, i| {
+            for (p) |_, i| {
                 p[i].n = self.nodes[0..j];
             }
 
@@ -659,16 +649,15 @@ pub fn Mint(comptime T: type, pp: anytype) type {
             return self;
         }
 
-// run the pipe, you can repeat runs with different arg_tuple(s) without redoing setup.
+        // run the pipe, you can repeat runs with different arg_tuple(s) without redoing setup.
 
-        pub fn run(self: *ThisPipe, context:anytype) !void {
-        
+        pub fn run(self: *ThisPipe, context: anytype) !void {
             const tuple = self.args(context);
             var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
             defer arena.deinit();
             const allocator = &arena.allocator;
 
-            var p = self.p[0..];        // use slices
+            var p = self.p[0..]; // use slices
             var nodes = self.p[0].n;
 
             // set starting input/output streams to 0 & connection status to .ok
@@ -698,7 +687,7 @@ pub fn Mint(comptime T: type, pp: anytype) type {
                 var temp: isize = 9999;
 
                 if (loop < 10) for (nodes) |*c| {
-                
+
                     // dispatch a pending output
                     if (c == c.src.outC and c.src.state == .output and c.in != .data and c.src.commit == commit) {
                         if (debugLoop) {
@@ -714,7 +703,6 @@ pub fn Mint(comptime T: type, pp: anytype) type {
                         continue :running;
                     }
 
-                    
                     // dispatch a pending peekTo or readTo
                     if (c == c.dst.inC and (c.dst.state == .peekTo or c.dst.state == .readTo) and c.in != .ok and c.dst.commit == commit) {
                         if (debugLoop) {
@@ -746,7 +734,6 @@ pub fn Mint(comptime T: type, pp: anytype) type {
                         continue :running;
                     }
 
-
                     // compete a sever after any data in the node is consumed
                     if ((c.src.outC == null and c.in == .ok) or (c.dst.inC == null and c.in == .ok)) {
                         c.in = .sever;
@@ -762,11 +749,10 @@ pub fn Mint(comptime T: type, pp: anytype) type {
                         inline while (j < p.len) : (j += 1) {
                             if (@TypeOf(tuple[j][0]) != void) { // prevent inline from generating void calls
                                 if (c.dst.i == j)
-                                    _ = @asyncCall(allocator.alignedAlloc(u8, 16, @frameSize(tuple[j][0])) catch 
-                                        unreachable
-                                    , &self.p[j].rc, tuple[j][0], tuple[j][1]);
+                                    _ = @asyncCall(allocator.alignedAlloc(u8, 16, @frameSize(tuple[j][0])) catch
+                                        unreachable, &self.p[j].rc, tuple[j][0], tuple[j][1]);
                             }
-                        } 
+                        }
                         continue :running;
                     }
 
@@ -778,9 +764,8 @@ pub fn Mint(comptime T: type, pp: anytype) type {
                         inline while (j < p.len) : (j += 1) {
                             if (@TypeOf(tuple[j][0]) != void) { // prevent inline from generating void calls
                                 if (c.src.i == j)
-                                    _ = @asyncCall(allocator.alignedAlloc(u8, 16, @frameSize(tuple[j][0])) catch 
-                                        unreachable
-                                    , &self.p[j].rc, tuple[j][0], tuple[j][1]);
+                                    _ = @asyncCall(allocator.alignedAlloc(u8, 16, @frameSize(tuple[j][0])) catch
+                                        unreachable, &self.p[j].rc, tuple[j][0], tuple[j][1]);
                             }
                         }
                         continue :running;
@@ -838,4 +823,4 @@ pub fn Mint(comptime T: type, pp: anytype) type {
             return;
         }
     };
-}  
+}
