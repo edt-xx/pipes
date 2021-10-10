@@ -22,17 +22,21 @@ pub fn build(b: *std.build.Builder) void {
     exe_opt.addOption(bool, "debugStart", false);
     exe_opt.addOption(bool, "debugStages", false);
 
-    exe.addPackage(.{
+   const pipes_pkg: std.build.Pkg = .{
         .name = "pipes",
         .path = .{ .path = "./pipes.zig" },
         .dependencies = &.{exe_opt.getPackage("build_options")},
-    });
+    };
 
-    exe.addPackage(.{
+    const filters_pkg: std.build.Pkg = .{
         .name = "filters",
         .path = .{ .path = "./filters.zig" },
         .dependencies = &.{exe_opt.getPackage("build_options")},
-    });
+        // .dependencies = &.{exe_opt.getPackage("build_options"), pipes_pkg},
+    };
+    
+    exe.addPackage(pipes_pkg);
+    exe.addPackage(filters_pkg);
 
     exe.setTarget(target); // best for this cpu
     //exe.setTarget(.{                                  // generic x86_64 - about 8% slower on my box
