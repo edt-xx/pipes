@@ -9,9 +9,10 @@ const debugStart = build_options.debugStart;
 
 // using std.meta.argsTuple implies that no filter can use generic functions.  We use Filter to generate filter functions
 // that are not generic.  We do not have the functions in StageType since we generate the args for the functions via
-// PipeInstance.args and can set the first arg of the non generic filter function to the StageType used by the pipe.
+// PipeInstance.args and can set the first arg of the non generic filter function to the StageType used by the pipe.        
 
 pub fn Filters(comptime StageType: type, comptime T: type) type {
+
     std.debug.assert(StageType.TU.inUnion(T));
 
     return struct {
@@ -21,9 +22,9 @@ pub fn Filters(comptime StageType: type, comptime T: type) type {
         // to set the name of the stage...
 
         pub fn exactdiv(self: *S, d: T) callconv(.Async) !void {
-            defer {
+            defer 
                 self.endStage();
-            }
+            
             if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
             while (true) {
                 if (debugStages) std.log.info("div pre peek {}_{s} {*}", .{ self.i, self.name, self.outC });
@@ -32,21 +33,20 @@ pub fn Filters(comptime StageType: type, comptime T: type) type {
                 if (i % d == 0)
                     try self.selectOutput(0)
                 else
-                    self.selectOutput(1) catch |err| {
-                        if (err != error.noOutStream) return err;
-                    };
+                    self.selectOutput(1) catch |err| 
+                        if (err != error.noOutStream) return err;                    
                 if (debugStages) std.log.info("div out {}_{s} {*}", .{ self.i, self.name, self.outC });
-                _ = self.output(i) catch |err| {
+                _ = self.output(i) catch |err| 
                     if (err != error.noOutStream) return err;
-                };
+                
                 _ = try self.readTo(u64);
             }
         }
 
         pub fn slice(self: *S, slc: *[]T) callconv(.Async) !void {
-            defer {
+            defer 
                 self.endStage();
-            }
+            
             var input: bool = false;
             _ = self.selectInput(0) catch |err| {
                 if (err == error.noInStream) input = true;
@@ -80,9 +80,9 @@ pub fn Filters(comptime StageType: type, comptime T: type) type {
         }
 
         pub fn arrayList(self: *S, al: *T) callconv(.Async) !void {
-            defer {
+            defer 
                 self.endStage();
-            }
+            
             var input: bool = false;
             _ = self.selectInput(0) catch |err| {
                 if (err == error.noInStream) input = true;
@@ -113,13 +113,13 @@ pub fn Filters(comptime StageType: type, comptime T: type) type {
         }
 
         pub fn console(self: *S) callconv(.Async) !void {
-            defer {
+            defer 
                 self.endStage();
-            }
+            
             const stdout = std.io.getStdOut().writer();
             if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
             while (true) {
-                if (debugStages) std.log.info("con in {}_{s} {*}", .{ self.i, self.name, self.inC });
+                if (debugStages) std.log.info("console in {}_{s} {*}", .{ self.i, self.name, self.inC });
                 const e = try self.peekTo(T);
                 try stdout.print("{any} ", .{e});
                 _ = self.output(e) catch {};
@@ -128,16 +128,44 @@ pub fn Filters(comptime StageType: type, comptime T: type) type {
         }
 
         pub fn fanin(self: *S) callconv(.Async) !void {
-            defer {
+            defer 
                 self.endStage();
+            
+            if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
+
+            var done:bool = false;
+            var s:u32 = 0;
+            self.selectInput(s) catch |e| {
+                if (e == error.noInStream) done = true;
+            };
+            while (!done) {
+                if (debugStages) std.log.info("fanin {}_{s} {*} {*}", .{ self.i, self.name, self.inC, self.outC });
+                while (true) {
+                    const tmp = try self.peekTo(S.TU) catch |e| {
+                        if (e == error.endOfStream) break else return e;
+                    };
+                    try self.output(tmp);
+                    _ = try self.readTo(S.TU);
+                }
+                s += 1;
+                self.selectInput(s) catch {
+                    done = true;
+                };
             }
+            return;
+        }
+        
+        pub fn faninany(self: *S) callconv(.Async) !void {
+            defer 
+                self.endStage();
+            
             if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
 
             while (true) {
                 _ = self.selectAnyInput() catch |e| {
                     if (e == error.endOfStream) continue else return e;
                 };
-                if (debugStages) std.log.info("fan {}_{s} {*} {*}", .{ self.i, self.name, self.inC, self.outC });
+                if (debugStages) std.log.info("faninany {}_{s} {*} {*}", .{ self.i, self.name, self.inC, self.outC });
                 const tmp = try self.peekTo(S.TU);
                 try self.output(tmp);
                 _ = try self.readTo(S.TU);
@@ -145,9 +173,9 @@ pub fn Filters(comptime StageType: type, comptime T: type) type {
         }
 
         pub fn copy(self: *S) callconv(.Async) !void {
-            defer {
+            defer
                 self.endstage();
-            }
+            
             if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
 
             while (true) {
@@ -157,9 +185,9 @@ pub fn Filters(comptime StageType: type, comptime T: type) type {
         }
 
         pub fn gen(self: *S, limit: T) callconv(.Async) !void {
-            defer {
+            defer 
                 self.endStage();
-            }
+            
             if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
 
             var i: T = 0;

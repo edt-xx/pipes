@@ -17,6 +17,7 @@ const State = enum(u4) {
     run,
     done,
     anyinput,
+    any,
 };
 
 const stageError = error{
@@ -154,6 +155,7 @@ pub fn ConnType(comptime S: type, comptime TU: type) type {
     return struct {
         pub const Conn = @This();
 
+        next: ?*Conn = null,
         src: *S = undefined, // used by output
         from: usize = 0,
         sout: usize = 0,
@@ -185,6 +187,8 @@ pub fn Stage(list: anytype) type {
         pub const StageType = @This();
         pub const TU = TypeUnion(list);
         pub const Conn = ConnType(StageType, TU);
+        
+        pub var pipeAddr:usize = 0;
 
         outC: ?*Conn = null,
         inC: ?*Conn = null,
@@ -200,7 +204,7 @@ pub fn Stage(list: anytype) type {
 
         // these are the commands that can be used inside filters.  Filters defines what a pipe stage does.
 
-        pub fn typeTo(self: *StageType, comptime T: type) !bool {
+        pub fn typeIs(self: *StageType, comptime T: type) !bool {
             if (debugCmd) std.log.info("peekTo {*} inC {*}\n", .{ self, self.inC });
             if (self.inC) |c| {
                 if (debugCmd) std.log.info("peekTo {*} in {} {}\n", .{ c, c.in, c.data });
@@ -336,7 +340,7 @@ pub fn Stage(list: anytype) type {
             }
             return error.noInStream;
         }
-
+          
         pub fn endStage(self: *StageType) void {
             for (self.n) |*c| {
                 if (c.dst == self) {
@@ -379,16 +383,30 @@ pub fn Stage(list: anytype) type {
             self.outC = null;
             return error.noOutStream;
         }
+        
     };
+}
+
+pub fn run(comptime context:type, pp:anytype) !void {
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = &arena.allocator;
+    
+    const thisPipe = Mint(pp).init(allocator);
+    return thisPipe.run(context);
+    
 }
 
 // Once we have defined the Stage & Filters types, we need to use a pipe tuple and prepare to run it using a
 // PipeInstance.  The PipeInstances is used to set the args for a pipe using struct(s) as context blocks.  Any required
 // args are set, the run funcion should be called to execute the pipe.
 
-pub fn Mint(comptime T: type, pp: anytype) type {
+pub fn Mint(pp: anytype) type {
+
     comptime var lmap = [_]?u8{null} ** pp.len; // mapping for stg to label
     comptime var nodesLen = pp.len; // number of nodes for the pipe
+    
     comptime var labels: std.meta.Tuple( // list of enum literals type for labels
         list: {
         comptime var l: []const type = &[_]type{};
@@ -399,6 +417,7 @@ pub fn Mint(comptime T: type, pp: anytype) type {
         }
         break :list l; // return tuple of enum literal types, to create labels tuple
     }) = undefined;
+    
     { // context block - we want to use k later in runtime
         comptime var k = 0; // save enum literals in the labels tuple
         inline for (pp) |stg| {
@@ -425,6 +444,7 @@ pub fn Mint(comptime T: type, pp: anytype) type {
         }
     }
 
+    comptime var ST:?type = null; // get the StageType from one of the Filter function calls
     comptime var arg_set: []const type = &[_]type{}; // build tuple of types for stage Fn and Args
     inline for (pp) |stg, i| { // fill in the args types
         comptime var flag: bool = true;
@@ -435,6 +455,10 @@ pub fn Mint(comptime T: type, pp: anytype) type {
                     if (debugStart) std.debug.print("fn {} {}\n", .{ i, elem });
                     arg_set = arg_set ++ &[_]type{std.meta.Tuple(&[_]type{ @TypeOf(elem), std.meta.ArgsTuple(@TypeOf(elem)) })};
                     flag = false;
+                    
+                    if (ST == null) { // get StageType from a Filter fn's first arg type which must be *StageType
+                        ST = @typeInfo(E.Fn.args[0].arg_type.?).Pointer.child;
+                    }
                 },
                 else => {},
             }
@@ -442,9 +466,11 @@ pub fn Mint(comptime T: type, pp: anytype) type {
         if (flag)
             arg_set = arg_set ++ &[_]type{std.meta.Tuple(&[_]type{void})};
     }
-
+    
+    std.debug.assert(ST != null);
+    
     return struct { // return an instance of ThisPipe
-        const StageType = T; // the Stage
+        const StageType = ST.?; // The StageType as extracted from a Filter function
         const Conn = StageType.Conn; // list of connections
         const ThisPipe = @This(); // this pipe's type
         const pipe = pp; // the pipe source tuple
@@ -549,17 +575,20 @@ pub fn Mint(comptime T: type, pp: anytype) type {
 
         pub fn init(allocator: *std.mem.Allocator) *ThisPipe {
             var self: *ThisPipe = allocator.create(ThisPipe) catch unreachable;
-
+            
+            StageType.pipeAddr =  @ptrToInt(self);
+            
             var p = self.p[0..]; // simipify life using slices
             var nodes = self.nodes[0..];
 
             inline for (pipe) |stg, i| {
                 p[i] = StageType{ .i = i, .allocator = allocator }; // ensure default values are set
-
+               
                 inline for (stg) |elem, j| { // parse the pipe
                     switch (@typeInfo(@TypeOf(elem))) {
                         .Fn, .BoundFn => { // fn....
                             var name = @typeName(@TypeOf(elem));
+                            //std.debug.print("{s}\n",.{name});
                             const one = std.mem.indexOfPos(u8, name, 0, @typeName(StageType)).?;
                             const two = std.mem.indexOfPos(u8, name, one + @typeName(StageType).len + 1, @typeName(StageType)).?;
                             const start = std.mem.indexOfPos(u8, name, two + @typeName(StageType).len + 1, ")").?;
@@ -621,7 +650,7 @@ pub fn Mint(comptime T: type, pp: anytype) type {
                         map[lbl] = Conn{};
                         map[lbl].?.set(p, i, 1, i, 1);
                     }
-                }
+                 }
                 if (debugStart) std.debug.print("{} {}\n", .{ i, j });
             }
 
