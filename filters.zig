@@ -20,6 +20,10 @@ pub fn Filters(comptime StageType: type, comptime T: type) type {
 
         // we need to return the global error set. When used, the fn type includes the name of the function.  We use this
         // to set the name of the stage...
+        
+        pub fn ok(self: *S) !void {
+            return if (self.err == error.ok) .{} else self.err;
+        }
 
         pub fn exactdiv(self: *S, d: T) callconv(.Async) !void {
             defer 
@@ -92,6 +96,7 @@ pub fn Filters(comptime StageType: type, comptime T: type) type {
                 }
                 
             } else if (try self.typeIs(T)) { // read elements from pipe and append to passed arrayList
+                self.err = error.ok;
                 loop: { 
                     var i: u32 = 0;
                     try al.?.resize(0);
@@ -108,13 +113,16 @@ pub fn Filters(comptime StageType: type, comptime T: type) type {
                     var an = std.ArrayList(T).init(al.?.allocator); // use the original arraylist's allocator
                     try an.appendSlice(al.?.items);   
                     _ = try self.output(an);
-                }
+                } else
+                    self.err = error.ok;
                
             } else if (try self.typeIs(std.ArrayList(T))) { // read arrayList(s) from pipe and output elements
                 std.debug.assert(al == null);
+                self.err = error.ok;
                 loop: { 
                     while (true) {
                         const d = self.peekTo(std.ArrayList(T)) catch {
+                            self.err = error.ok;
                             break :loop;
                         };
                         for (d.items) |e| {
@@ -126,7 +134,23 @@ pub fn Filters(comptime StageType: type, comptime T: type) type {
                 
             } else
                 unreachable;
-            return;
+            return ok(self);
+        }
+        
+        pub fn variable(self: *S, v: *T) callconv(.Async) !void {
+            defer 
+                self.endStage();
+            
+            if (val: { self.selectInput(0) catch break :val true; break :val false; }) { // output elements of passed arrayList
+                 _ = try self.output(v);
+            } else {
+                v.* = try self.peekto(T);                
+                while (true) {
+                    const d = self.peekTo(std.ArrayList(T)) catch break;
+                    _ = self.output(d) catch break;
+                }
+            }
+            return ok(self);
         }
 
         pub fn console(self: *S) callconv(.Async) !void {
@@ -140,22 +164,23 @@ pub fn Filters(comptime StageType: type, comptime T: type) type {
                 if (try self.typeIs(T)) {
                     const e = try self.peekTo(T);
                     try stdout.print("{any} ", .{e});
-                    _ = self.output(e) catch {};
+                    _ = self.output(e) catch { self.err = error.ok; };
                     _ = try self.readTo(T);
                 } else if (try self.typeIs(*[]T)) {
                     const e = try self.peekTo(*[]T);
                     try stdout.print("{any} ", .{e});
-                    _ = self.output(e) catch {};
+                    _ = self.output(e) catch { self.err = error.ok; };
                     _ = try self.readTo(*[]T);
                 } else if (try self.typeIs(std.ArrayList(T))) {
                     const e = try self.peekTo(std.ArrayList(T));
                     try stdout.print("{any} ", .{e});
-                    _ = self.output(e) catch {};
+                    _ = self.output(e) catch { self.err = error.ok; };
                     _ = try self.readTo(std.ArrayList(T));
                 } else 
                     unreachable;
                 
             }
+            return ok(self);
         }
 
         pub fn fanin(self: *S) callconv(.Async) !void {

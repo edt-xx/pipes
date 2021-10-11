@@ -196,6 +196,7 @@ pub fn Stage(list: anytype) type {
         commit: isize = -90909090,
         frame: anyframe = undefined,
         rc: anyerror!void = undefined,
+        err: stageError = error.ok,
         n: []Conn = undefined,
         name: ?[]const u8 = null,
         end: bool = false,
@@ -221,10 +222,12 @@ pub fn Stage(list: anytype) type {
                 if (c.in == .data) {
                     return c.data.typeIs(T);
                 } else {
-                    return error.endOfStream;
+                    self.err = error.endOfStream;
+                    return self.err;
                 }
             }
-            return error.noInStream;
+            self.err = error.noInStream;
+            return self.err;
         }
 
         pub fn peekTo(self: *StageType, comptime T: type) !T {
@@ -244,10 +247,12 @@ pub fn Stage(list: anytype) type {
                 if (c.in == .data) {
                     return c.data.get(T);
                 } else {
-                    return error.endOfStream;
+                    self.err = error.endOfStream;
+                    return self.err;
                 }
             }
-            return error.noInStream;
+            self.err = error.noInStream;
+            return self.err;
         }
 
         pub fn readTo(self: *StageType, comptime T: type) !T {
@@ -265,10 +270,12 @@ pub fn Stage(list: anytype) type {
                     c.in = .ok;
                     return c.data.get(T);
                 } else {
-                    return error.endOfStream;
+                    self.err =  error.endOfStream;
+                    return self.err;
                 }
             }
-            return error.noInStream;
+            self.err = error.noInStream;
+            return self.err;
         }
 
         pub fn output(self: *StageType, v: anytype) !void {
@@ -289,10 +296,12 @@ pub fn Stage(list: anytype) type {
                     c.data.put(v);
                     return;
                 } else {
-                    return error.endOfStream;
+                    self.err =  error.endOfStream;
+                    return self.err;
                 }
             }
-            return error.noOutStream;
+            self.err = error.noOutStream;
+            return self.err;
         }
 
         pub fn selectOutput(self: *StageType, o: usize) !void {
@@ -302,13 +311,19 @@ pub fn Stage(list: anytype) type {
         pub fn severOutput(self: *StageType) !void {
             if (self.outC) |_| {
                 self.outC = null;
-            } else return error.noOutStream;
+            } else {
+                self.err = error.noOutStream;
+                return self.err;
+            }
         }
 
         pub fn severInput(self: *StageType) !void {
             if (self.inC) |_| {
                 self.inC = null;
-            } else return error.noOutStream;
+            } else {
+                self.err = error.noInStream;
+                return self.err;
+            }
         }
 
         pub fn selectInput(self: *StageType, i: usize) !void {
@@ -334,11 +349,13 @@ pub fn Stage(list: anytype) type {
                     if (c.in == .data) {
                         return c.sin;
                     } else {
-                        return error.endOfStream;
+                        self.err =  error.endOfStream;
+                        return self.err;
                     }
                 }
             }
-            return error.noInStream;
+            self.err = error.noInStream;
+            return self.err;
         }
           
         pub fn endStage(self: *StageType) void {
@@ -352,6 +369,10 @@ pub fn Stage(list: anytype) type {
             }
             return;
         }
+        
+        pub fn ok(self: *StageType) !void {
+            return if (self.err == error.ok or self.err == error.endOfStream) .{} else self.err;
+        }
 
         fn setinC(self: *StageType, i: usize) !void {
             for (self.n) |*c| {
@@ -361,7 +382,8 @@ pub fn Stage(list: anytype) type {
                 }
             }
             self.inC = null;
-            return error.noInStream;
+            self.err = error.noInStream;
+            return self.err;
         }
 
         pub fn countInstreams(self: *StageType) usize {
@@ -381,7 +403,8 @@ pub fn Stage(list: anytype) type {
                 }
             }
             self.outC = null;
-            return error.noOutStream;
+            self.err = error.noOutStream;
+            return self.err;
         }
         
     };
@@ -720,6 +743,7 @@ pub fn Mint(pp: anytype) type {
                     s.commit = -@intCast(isize, (i + 1));
                     s.state = .start;
                     s.rc = error.active;
+                    s.err = error.ok;
                 }
             }
 
