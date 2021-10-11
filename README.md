@@ -22,8 +22,10 @@ Of course zig is heavily typed.  So its not as simple to call a pipe as it is in
 ```
 const std = @import("std");
 
-const pipe = @import("pipes");
-const sys = @import("filters");
+const pipe = struct {
+    usingnamespace @import("pipes");
+    usingnamespace @import("filters");
+};
 
 const context = struct {
     pub var xxx: u16 = 5;
@@ -43,10 +45,38 @@ const aPipe = .{
         .{ .b, ._ },                    // connect to secondary input stread of fanin
 };
 
-try pipe.Mint(S, aPipe).init(allocator).run(context);
+try pipe.Mint(aPipe).init(allocator).run(context);
 ```
 Zig imposes constraints.  To create pipes within these limits requires a bit of work.  We need to define what gets passed on connections.  The connection structure (Conn) must be runtime so it cannot use anytype.  Since we will want to send different types thru the same connections I created the TypeUnion struct (tagged Unions did not quite fit).   The StageType defines the types required for Connections and the TypeUnion they use.  We cannot use std.meta.ArgsTuple with generic functions.  This, and the lack of function name overloading (not a bad thing) is what triggers the requirement to setup Filters.  To process variables in pipes @field is used.  This requires a struct with pub variables.  Alternately you can use pub global vars and @This() for context.   pipe.Mint returns a type so the init function is need to create an instance which cannot be allocated on the stack so an allocator is needed.
 
-The pipe.Mint args function also gets complicated due to known problems with runtime values in multilevel tuples in Stage 1.
+The most common use case for a pipe is run once.  A helper function to do this is included in pipes.zig.  To use it create the filters and run the pipe passing just the context and pipe tuple.
+
+```
+const std = @import("std");
+
+const pipe = struct {
+    usingnamespace @import("pipes");
+    usingnamespace @import("filters");
+};
+
+...
+
+const f = pipe.Filters(pipe.Stage(.{u64, std.ArrayList(u64) }), u64);
+
+const y = struct {
+        pub var blist = std.ArrayList(u64).init(allocator);
+};
+    
+try y.alist.appendSlice(&[_]u64{2, 3, 5, 7, 11, 13};);    
+
+try pipe.run(y, .{
+    .{ f.arrayList, .{"blist"} },
+    .{ f.console, ._ },
+});
+    
+```
+
+The pipe.Mint args function gets complicated due to known stage 1 problems with runtime values in multilevel tuples.  Once this 
+bug is fixed in stage2, the requirement to include a context will probably dissapear. 
 
 Does this Help?  What questions does it raise?
