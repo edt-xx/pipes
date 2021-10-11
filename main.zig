@@ -15,8 +15,10 @@ pub const x = struct {
 
 pub var testme: u64 = 50;
 
+pub var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+
 pub fn main() !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    
     defer arena.deinit();
     const allocator = &arena.allocator;
 
@@ -24,7 +26,7 @@ pub fn main() !void {
 
     // create pipe commands and stages for type u128
     //const pTypes = .{ u64, *[]u64 };
-    const f = pipe.Filters(pipe.Stage(.{ u64, *[]u64 }), u64);
+    const f = pipe.Filters(pipe.Stage(.{ u64, *[]u64, std.ArrayList(u64) }), u64);
     //const g = pipe.myFilters(f.S, u64);
     
     //var xxx:u64 = 75;
@@ -47,7 +49,7 @@ pub fn main() !void {
     x.xxx += 1;
     x.aaa += 7;
 
-    // create a container for this pipe with type uP and setup the pipe's structure
+    // create a container for this pipe 
     var myPipe = pipe.Mint(aPipe).init(allocator);
 
     // run the pipe with the above args
@@ -67,36 +69,37 @@ pub fn main() !void {
     const y = struct {
         pub var xxx: u16 = 17; // must be pub
         pub var aaa: u16 = 80;
+        pub var alist = std.ArrayList(u64).init(allocator);
+        pub var blist = std.ArrayList(u64).init(allocator);
     };
 
     // and using a different context structure
     try myPipe.run(y);
+    std.debug.print("\n", .{});
 
     const pSlicer = .{
         .{ f.slice, .{"sss"} }, // extract elements of slice sss and pass to console
         .{ f.console, ._ },
     };
 
-    std.debug.print("\n", .{});
-
     var sPiper = pipe.Mint(pSlicer).init(allocator);
     try sPiper.run(x);
+    std.debug.print("\n", .{});
 
-    // const g = Filters(uP, *[]u64);      // for later
     const pSlicew = .{ 
         .{ f.gen, .{"ar.len"} },
         .{ f.slice, .{"sss"}, ._ }, // update slice with generated values
     };
 
-    std.debug.print("\n", .{});
-
     var sPipew = pipe.Mint(pSlicew).init(allocator);
 
     // update the slice
     try sPipew.run(x);
-
+    // no console
+    
     // output the updated slice
     try sPiper.run(x);
+    std.debug.print("\n", .{});
 
     _ = testme;
     const pNoContect = .{ 
@@ -105,6 +108,23 @@ pub fn main() !void {
     };
 
     try pipe.Mint(pNoContect).init(allocator).run(@This());
-
+    std.debug.print("\n", .{});
+    
+    const init = [_]u64{2, 3, 5, 7, 11, 13};
+    try y.alist.appendSlice(&init);
+    const pReadAL = .{
+        .{ f.arrayList, .{"alist"} },   // output elements of alist into pipe
+        .{ f.arrayList, .{"blist"} },   // assemble blist from pipe
+        .{ f.arrayList, .{null} },      // read copy of blist from pipe and output elements
+        .{ f.console, ._ },
+    };
+    
+    try pipe.run(y, pReadAL);
+    std.debug.print("\n", .{});
+    
+    try pipe.run(y, .{
+        .{ f.arrayList, .{"blist"} },
+        .{ f.console, ._ },
+    });
     std.debug.print("\n", .{});
 }
