@@ -79,36 +79,53 @@ pub fn Filters(comptime StageType: type, comptime T: type) type {
             return;
         }
 
-        pub fn arrayList(self: *S, al: *T) callconv(.Async) !void {
+        // if in has elements of type T assemble them into an ArrayList, save in al and pass a copy al to out 0
+        // if in is not connected, output the elements in al to out 0
+        // if in has elements of type ArrayList(T), read arrayList and output elements.  al should be null.
+        pub fn arrayList(self: *S, al: ?*std.ArrayList(T)) callconv(.Async) !void {
             defer 
                 self.endStage();
             
-            var input: bool = false;
-            _ = self.selectInput(0) catch |err| {
-                if (err == error.noInStream) input = true;
-            };
-            const D = std.meta.Elem(al.items);
-            if (input) {
-                for (al.items) |d| {
+            if (val: { self.selectInput(0) catch break :val true; break :val false; }) { // output elements of passed arrayList
+                for (al.?.items) |d| {
                     _ = try self.output(d);
                 }
-            } else {
-                loop: { // probably should use an arraylist here and slice the results
+                
+            } else if (try self.typeIs(T)) { // read elements from pipe and append to passed arrayList
+                loop: { 
                     var i: u32 = 0;
-                    al.resize(0);
+                    try al.?.resize(0);
                     while (true) : (i += 1) {
-                        const d = self.peekTo(D) catch {
+                        const d = self.peekTo(T) catch {
                             break :loop;
                         };
-                        try al.append(d);
-                        _ = try self.readTo(D);
+                        try al.?.append(d);
+                        _ = try self.readTo(T);
                     }
-                    return error.outOfBounds;
                 }
-                var an = try std.arrayList(D).init(al.allocator); // use the original arraylist's allocator
-                an.appendSlice(al.items);
-                _ = self.output(an) catch {};
-            }
+                // if output stream connected out a copy of the arrayList onto it
+                if (val: { self.selectOutput(0) catch break :val false; break :val true; }) {
+                    var an = std.ArrayList(T).init(al.?.allocator); // use the original arraylist's allocator
+                    try an.appendSlice(al.?.items);   
+                    _ = try self.output(an);
+                }
+               
+            } else if (try self.typeIs(std.ArrayList(T))) { // read arrayList(s) from pipe and output elements
+                std.debug.assert(al == null);
+                loop: { 
+                    while (true) {
+                        const d = self.peekTo(std.ArrayList(T)) catch {
+                            break :loop;
+                        };
+                        for (d.items) |e| {
+                            _ = try self.output(e);
+                        }
+                        _ = try self.readTo(std.ArrayList(T));
+                    }
+                } 
+                
+            } else
+                unreachable;
             return;
         }
 
@@ -120,10 +137,24 @@ pub fn Filters(comptime StageType: type, comptime T: type) type {
             if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
             while (true) {
                 if (debugStages) std.log.info("console in {}_{s} {*}", .{ self.i, self.name, self.inC });
-                const e = try self.peekTo(T);
-                try stdout.print("{any} ", .{e});
-                _ = self.output(e) catch {};
-                _ = try self.readTo(T);
+                if (try self.typeIs(T)) {
+                    const e = try self.peekTo(T);
+                    try stdout.print("{any} ", .{e});
+                    _ = self.output(e) catch {};
+                    _ = try self.readTo(T);
+                } else if (try self.typeIs(*[]T)) {
+                    const e = try self.peekTo(*[]T);
+                    try stdout.print("{any} ", .{e});
+                    _ = self.output(e) catch {};
+                    _ = try self.readTo(*[]T);
+                } else if (try self.typeIs(std.ArrayList(T))) {
+                    const e = try self.peekTo(std.ArrayList(T));
+                    try stdout.print("{any} ", .{e});
+                    _ = self.output(e) catch {};
+                    _ = try self.readTo(std.ArrayList(T));
+                } else 
+                    unreachable;
+                
             }
         }
 
