@@ -457,6 +457,7 @@ pub fn Mint(pp: anytype) type {
                     flag = false;
                     
                     if (ST == null) { // get StageType from a Filter fn's first arg type which must be *StageType
+                        std.debug.assert(!E.Fn.is_generic);
                         ST = @typeInfo(E.Fn.args[0].arg_type.?).Pointer.child;
                     }
                 },
@@ -508,6 +509,9 @@ pub fn Mint(pp: anytype) type {
                                         if (debugStart) std.debug.print("Int {} {}\n", .{ j, arg });
                                         tuple[i][1][k + 1] = arg;
                                     },
+                                    .Null => {
+                                        tuple[i][1][k + 1] = null;
+                                    },
                                     .Pointer => { // string with a var, var.field or (use a slice, not an array)
                                         if (debugStart) std.debug.print("Ptr {} {s}\n", .{ j, arg });
 
@@ -525,6 +529,20 @@ pub fn Mint(pp: anytype) type {
                                                         tuple[i][1][k + 1] = @field(context, arg);
                                                 },
                                                 .Pointer => |p| {
+                                                    switch (@typeInfo(p.child)) {
+                                                        .Int, .Float, .Pointer, .Struct => {
+                                                            if (std.mem.indexOfPos(u8, arg, 0, ".")) |dot| // single level
+                                                                tuple[i][1][k + 1] = &@field(@field(context, arg[0..dot]), arg[dot + 1 ..])
+                                                            else
+                                                                tuple[i][1][k + 1] = &@field(context, arg);
+                                                        },
+                                                        else => {
+                                                            @compileLog(p.child);
+                                                            @compileLog(@typeInfo(p.child));
+                                                        },
+                                                    }
+                                                },
+                                                .Optional => |p| {
                                                     switch (@typeInfo(p.child)) {
                                                         .Int, .Float, .Pointer, .Struct => {
                                                             if (std.mem.indexOfPos(u8, arg, 0, ".")) |dot| // single level
