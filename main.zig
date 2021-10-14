@@ -130,13 +130,13 @@ pub fn main() !void {
     std.debug.print("\n", .{});
     
     try pipe.run(y, .{
-        .{ a.variable, .{"blist"} },    // put arraylist blist into pipe
+        .{ a.variable, .{"blist"} },           // put arraylist blist into pipe 
         .{ f.arrayList, .{null, .pipe} },      // output elements of blist 
         .{ f.console, ._ },
     });
     std.debug.print("\n", .{});
     
-    y.list = f.S.TU.list(allocator2, .{u64, []u64, @TypeOf(y.alist)}, .{51, y.init, y.alist});
+    y.list = f.S.TU.list(allocator2, .{u64, []u64, @TypeOf(y.alist)}, .{51, y.prime[1..4], y.alist});
     //defer gpaAlloc.free(y.list);
     // std.debug.print("{any}\n",.{y.list});
     
@@ -146,7 +146,7 @@ pub fn main() !void {
         .{ .b, f.faninany },
         .{ f.console, ._ },             // display the number
         .{ .a, },                       // seconday output of collateTypes is ignored ([]u64)
-        .{ f.slice, .{null} },
+        .{ f.slice, .{null} },          // read the slice
         .{ .b, ._ },
         .{ .a },                        // trinary output of collateTypes (std.ArrayList(u64))
         .{ f.arrayList, .{null, .pipe} },      // elements of the arraylist are put onto the pipe

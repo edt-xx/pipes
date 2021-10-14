@@ -601,32 +601,30 @@ pub fn Mint(pp: anytype) type {
                                             continue;
                                             
                                         comptime {
-                                            // handle optionals too
-                                            var t = @typeInfo(@TypeOf(tuple[i][1][k+1]));
-                                            if (t == .Optional) {
-                                                t = @typeInfo(t.Optional.child);
+                                            var t = @typeInfo(@TypeOf(tuple[i][1][k+1])); // base type or from args tuple
+                                            if (t == .Optional) { 
+                                                t = @typeInfo(t.Optional.child); // type of the optional
                                             }
-                                            // use the type of the args tuple to decide what we are pointing too
-                                            switch (t) {
+                                            switch (t) { // decide what to do with the arg using type in args tuple
                                                 .Int, .Float => {
-                                                    if (std.mem.indexOfPos(u8, arg, 0, ".")) |dot| // single level struct.field
-                                                        tuple[i][1][k+1] = @field(@field(context, arg[0..dot]), arg[dot+1..])
+                                                    tuple[i][1][k+1] = if (std.mem.indexOfPos(u8,arg,0,".")) |dot|
+                                                        @field(@field(context, arg[0..dot]), arg[dot+1..])
                                                     else
-                                                        tuple[i][1][k+1] = @field(context, arg);
+                                                        @field(context, arg);
                                                 },
-                                                .Pointer => |p| {
-                                                    if (p.size == .Slice) {
-                                                        if (std.mem.indexOfPos(u8, arg, 0, ".")) |dot| // single level
-                                                            tuple[i][1][k+1] = @field(@field(context, arg[0..dot]), arg[dot+1..])
+                                                .Pointer => |p| { 
+                                                    if (p.size == .Slice) { // slices are implied pointers
+                                                        tuple[i][1][k+1] = if (std.mem.indexOfPos(u8,arg,0,".")) |dot| 
+                                                            @field(@field(context, arg[0..dot]), arg[dot+1..])
                                                         else
-                                                            tuple[i][1][k+1] = @field(context, arg);
-                                                    } else {  
+                                                            @field(context, arg);
+                                                    } else { // pointer to something else (non slice)
                                                         switch (@typeInfo(p.child)) {
                                                             .Int, .Float, .Struct, .Pointer => {
-                                                                if (std.mem.indexOfPos(u8, arg, 0, ".")) |dot| // single level
-                                                                    tuple[i][1][k+1] = &@field(@field(context, arg[0..dot]), arg[dot+1..])
+                                                                tuple[i][1][k+1] = if (std.mem.indexOfPos(u8,arg,0,".")) |dot| 
+                                                                    &@field(@field(context, arg[0..dot]), arg[dot+1..])
                                                                 else
-                                                                    tuple[i][1][k+1] = &@field(context, arg);
+                                                                    &@field(context, arg);
                                                             },
                                                             else => {
                                                                 @compileLog(p.child);
@@ -691,10 +689,6 @@ pub fn Mint(pp: anytype) type {
                             p[i].name = name[start..end];
                             if (debugStart) std.debug.print("stg {} {s}\n", .{ i, p[i].name });
                         },
-                        //.Pointer => { // *const u8...
-                        //    if (debugStart) std.debug.print("label {} {s}\n", .{ i, elem });
-                        //    p[i].label = elem;
-                        //},
                         .EnumLiteral => { // label (.any) or end (._)
                             if (j > 0 and elem == ._) { // j == 0 case caught by constructor
                                 p[i].end = true;
@@ -779,9 +773,9 @@ pub fn Mint(pp: anytype) type {
             var nodes = self.p[0].n;
             self.rc = .{};
             
-            const allocator = p[0].allocator;
+            const allocator = p[0].allocator; // use the same allocator used to allocate ThisPipe
             
-            // set starting input/output streams to lowest connect streams (usually 0 - but NOT always)
+            // set starting input/output streams to lowest connected streams (usually 0 - but NOT always)
             for (nodes) |*n| {
             
                 if (n.src.outC) |c| {
