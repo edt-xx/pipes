@@ -232,6 +232,18 @@ pub fn Stage(list: anytype) type {
 
         // these are the commands that can be used inside filters.  Filters defines what a pipe stage does.
 
+        pub fn inStream(self: *StageType) !usize {
+            if (self.inC) |c|
+                return c.sin;
+            return error.noInStream;
+        }
+        
+        pub fn outStream(self: *StageType) !usize {
+            if (self.outC) |c|
+                return c.sout;
+            return error.noOutStream;
+        }
+        
         pub fn typeIs(self: *StageType, comptime T: type) !bool {
             if (debugCmd) std.log.info("peekTo {*} inC {*}\n", .{ self, self.inC });
             if (self.inC) |c| {
@@ -560,7 +572,10 @@ pub fn Mint(pp: anytype) type {
                             tuple[i][1][0] = &self.p[i];
                             flag = false;
                         },
-                        .Struct => { // struct....
+                        .EnumLiteral => { // label
+                            continue;
+                        },
+                        .Struct => { // struct we have found the tuple with the args...
                             inline for (elem) |arg, k| {
                                 //@compileLog(i);
                                 //@compileLog(@typeInfo(@TypeOf(tuple[i][1][k+1])));
@@ -568,60 +583,63 @@ pub fn Mint(pp: anytype) type {
                                 switch (@typeInfo(@TypeOf(arg))) {
                                     .Int, .Float, .ComptimeInt, .ComptimeFloat, .EnumLiteral => { // constants
                                         if (debugStart) std.debug.print("Int {} {}\n", .{ j, arg });
-                                        tuple[i][1][k + 1] = arg;
+                                        tuple[i][1][k+1] = arg;
                                     },
                                     .Null => {
-                                        tuple[i][1][k + 1] = null;
+                                        tuple[i][1][k+1] = null;
                                     },
                                     .Pointer => { // string with a var, var.field or (use a slice, not an array)
                                         if (debugStart) std.debug.print("Ptr {} {s}\n", .{ j, arg });
 
                                         // this would be much simpiler if runtime vars worked in nested tuples...
 
-                                        if (@TypeOf(tuple[i][1][k + 1]) == []const u8 and arg[0] == "\"") { // expect a string
-                                            tuple[i][1][k + 1] = arg[1..];
-                                        } else if (context != void) comptime {
+                                        if (@TypeOf(tuple[i][1][k+1]) == []const u8 and arg[0] == "\"") { // expect a string
+                                            tuple[i][1][k+1] = arg[1..];
+                                            continue;
+                                        }
+                                        if (context == void) 
+                                            continue;
+                                            
+                                        comptime {
+                                            // handle optionals too
+                                            var t = @typeInfo(@TypeOf(tuple[i][1][k+1]));
+                                            if (t == .Optional) {
+                                                t = @typeInfo(t.Optional.child);
+                                            }
                                             // use the type of the args tuple to decide what we are pointing too
-                                            switch (@typeInfo(@TypeOf(tuple[i][1][k + 1]))) {
+                                            switch (t) {
                                                 .Int, .Float => {
                                                     if (std.mem.indexOfPos(u8, arg, 0, ".")) |dot| // single level struct.field
-                                                        tuple[i][1][k + 1] = @field(@field(context, arg[0..dot]), arg[dot + 1 ..])
+                                                        tuple[i][1][k+1] = @field(@field(context, arg[0..dot]), arg[dot+1..])
                                                     else
-                                                        tuple[i][1][k + 1] = @field(context, arg);
+                                                        tuple[i][1][k+1] = @field(context, arg);
                                                 },
                                                 .Pointer => |p| {
-                                                    switch (@typeInfo(p.child)) {
-                                                        .Int, .Float, .Pointer, .Struct => {
-                                                            if (std.mem.indexOfPos(u8, arg, 0, ".")) |dot| // single level
-                                                                tuple[i][1][k + 1] = &@field(@field(context, arg[0..dot]), arg[dot + 1 ..])
-                                                            else
-                                                                tuple[i][1][k + 1] = &@field(context, arg);
-                                                        },
-                                                        else => {
-                                                            @compileLog(p.child);
-                                                            @compileLog(@typeInfo(p.child));
-                                                        },
-                                                    }
-                                                },
-                                                .Optional => |p| {
-                                                    switch (@typeInfo(p.child)) {
-                                                        .Int, .Float, .Pointer, .Struct => {
-                                                            if (std.mem.indexOfPos(u8, arg, 0, ".")) |dot| // single level
-                                                                tuple[i][1][k + 1] = &@field(@field(context, arg[0..dot]), arg[dot + 1 ..])
-                                                            else
-                                                                tuple[i][1][k + 1] = &@field(context, arg);
-                                                        },
-                                                        else => {
-                                                            @compileLog(p.child);
-                                                            @compileLog(@typeInfo(p.child));
-                                                        },
+                                                    if (p.size == .Slice) {
+                                                        if (std.mem.indexOfPos(u8, arg, 0, ".")) |dot| // single level
+                                                            tuple[i][1][k+1] = @field(@field(context, arg[0..dot]), arg[dot+1..])
+                                                        else
+                                                            tuple[i][1][k+1] = @field(context, arg);
+                                                    } else {  
+                                                        switch (@typeInfo(p.child)) {
+                                                            .Int, .Float, .Struct, .Pointer => {
+                                                                if (std.mem.indexOfPos(u8, arg, 0, ".")) |dot| // single level
+                                                                    tuple[i][1][k+1] = &@field(@field(context, arg[0..dot]), arg[dot+1..])
+                                                                else
+                                                                    tuple[i][1][k+1] = &@field(context, arg);
+                                                            },
+                                                            else => {
+                                                                @compileLog(p.child);
+                                                                @compileLog(@typeInfo(p.child));
+                                                            },
+                                                        }
                                                     }
                                                 },
                                                 else => {
-                                                    @compileLog(@TypeOf(tuple[i][1][k + 1])); // unsupported arg type
+                                                    @compileLog(@TypeOf(tuple[i][1][k+1])); // unsupported arg type
                                                 },
                                             }
-                                        };
+                                        }
                                     },
                                     // more types will be needed, depending on additional stages
                                     else => {

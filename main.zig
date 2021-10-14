@@ -29,7 +29,7 @@ pub fn main() !void {
 
     // create pipe commands and stages for type u128
     //const pTypes = .{ u64, *[]u64 };
-    const f = pipe.Filters(pipe.Stage(.{ u64, *[]u64, std.ArrayList(u64) }), u64);
+    const f = pipe.Filters(pipe.Stage(.{ u64, []u64, std.ArrayList(u64) }), u64);
     const a = pipe.Filters(f.S, std.ArrayList(u64)); // set of filters with std.ArrayList(u64) as type
     
     //var xxx:u64 = 75;
@@ -119,10 +119,10 @@ pub fn main() !void {
     
     try y.alist.appendSlice(&y.prime);
     const pReadAL = .{
-        .{ f.arrayList, .{"alist"} },
+        .{ f.arrayList, .{"alist", .read} },
         .{ f.slice, .{"init"} },        // output elements of alist into pipe
-        .{ f.arrayList, .{"blist"} },   // assemble blist from pipe
-        .{ f.arrayList, .{null} },      // read copy of blist from pipe and output elements
+        .{ f.arrayList, .{"blist", .write} },   // assemble blist from pipe
+        .{ f.arrayList, .{null, .pipe} },      // read copy of blist from pipe and output elements
         .{ f.console, ._ },
     };
     
@@ -131,12 +131,12 @@ pub fn main() !void {
     
     try pipe.run(y, .{
         .{ a.variable, .{"blist"} },    // put arraylist blist into pipe
-        .{ f.arrayList, .{null} },      // output elements of blist 
+        .{ f.arrayList, .{null, .pipe} },      // output elements of blist 
         .{ f.console, ._ },
     });
     std.debug.print("\n", .{});
     
-    y.list = f.S.TU.list(allocator2, .{u64, u64, @TypeOf(y.alist)}, .{51, 103, y.alist});
+    y.list = f.S.TU.list(allocator2, .{u64, []u64, @TypeOf(y.alist)}, .{51, y.init, y.alist});
     //defer gpaAlloc.free(y.list);
     // std.debug.print("{any}\n",.{y.list});
     
@@ -145,9 +145,11 @@ pub fn main() !void {
         .{ .a, f.collateTypes },        // split by types in typeunion (u64 is stream 0)
         .{ .b, f.faninany },
         .{ f.console, ._ },             // display the number
-        .{ .a, ._},                     // seconday output of collateTypes is ignored ([]u64)
+        .{ .a, },                       // seconday output of collateTypes is ignored ([]u64)
+        .{ f.slice, .{null} },
+        .{ .b, ._ },
         .{ .a },                        // trinary output of collateTypes (std.ArrayList(u64))
-        .{ f.arrayList, .{null} },      // elements of the arraylist are put onto the pipe
+        .{ f.arrayList, .{null, .pipe} },      // elements of the arraylist are put onto the pipe
         .{ .b, ._},                     // and sent to secondary input of faninany
     });
     std.debug.print("\n", .{});
@@ -159,7 +161,7 @@ pub fn main() !void {
         .{ f.console, ._ },             // display the number
         .{ .a, ._},                     // seconday output of collateTypes is ignored ([]u64)
         .{ .a },                        // trinary output of collateTypes (std.ArrayList(u64))
-        .{ f.arrayList, .{null} },      // elements of the arraylist are put onto the pipe
+        .{ f.arrayList, .{null, .pipe} },      // elements of the arraylist are put onto the pipe
         .{ .b, ._},                     // and sent to secondary input of faninany
     });
     std.debug.print("\n", .{});    

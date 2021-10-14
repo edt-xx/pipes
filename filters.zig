@@ -11,12 +11,13 @@ const debugStart = build_options.debugStart;
 // that are not generic.  We do not have the functions in StageType since we generate the args for the functions via
 // PipeInstance.args and can set the first arg of the non generic filter function to the StageType used by the pipe.        
 
-pub fn Filters(comptime StageType: type, comptime T: type) type {
+pub fn Filters(comptime StageType: type, comptime Selected: type) type {
 
-    std.debug.assert(StageType.TU.inUnion(T));
+    std.debug.assert(StageType.TU.inUnion(Selected));
 
     return struct {
         pub const S = StageType;
+        pub const T = Selected;
 
         // we need to return the global error set. When used, the fn type includes the name of the function.  We use this
         // to set the name of the stage...
@@ -116,43 +117,57 @@ pub fn Filters(comptime StageType: type, comptime T: type) type {
         }
         
         // put the contents of the slice into the pipe, then copy any inputs to output
-        pub fn slice(self: *S, slc: *[]T) callconv(.Async) !void {
+        pub fn slice(self: *S, slc: ?[]T) callconv(.Async) !void {
             defer 
                 self.endStage();
             
             if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
             
-            for (slc.*) |d| {
-                _ = try self.output(d);
-            }
-            while (true) {  // copy rest stream to output
-                const d = self.peekTo(S.TU) catch break;
-                self.output(d) catch break;
-                _ = self.readTo(S.TU) catch break;
+            if (slc == null) {
+                while (true) {
+                    const d = try self.peekTo([]T);
+                    for (d) |i| {
+                        _ = try self.output(i);
+                    }
+                    _ = try self.readTo([]T);
+                }                
+            } else {
+                for (slc.?) |d| {
+                    _ = try self.output(d);
+                }
+                while (true) {  // copy rest stream to output
+                    const d = self.peekTo(S.TU) catch break;
+                    self.output(d) catch break;
+                    _ = self.readTo(S.TU) catch break;
+                }
             }
             return self.ok();
         }
 
-        // if in has elements of type T assemble them into an ArrayList, save in al and pass a copy al to out 0
-        // if in is not connected, output the elements in al to out 0
-        // if in has elements of type ArrayList(T), read arrayList and output elements.  al should be null.
-        pub fn arrayList(self: *S, al: ?*std.ArrayList(T)) callconv(.Async) !void {
+        // .read input ArrayList putting elements onto the pipe
+        // .write clear the ArrayList, read elements from the pipe, appending to the ArrayList
+        // .append read elements from the pipe, appending to the ArrayList
+        // .pipe read an ArrayList(s) from the pipe and write the elements to the pipe.  Arguement should be null
+        pub fn arrayList(self: *S, al: ?*std.ArrayList(T), e:enum{read, write, append, pipe}) callconv(.Async) !void {
             defer 
                 self.endStage();
             
             if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
             
-            if (al != null) {
+            if (e != .pipe) {
                 if (val: { self.selectInput(0) catch break :val true; break :val false; }) { // output items of arrayList arg
-                    for (al.?.items) |d| {
-                        _ = try self.output(d);
+                    std.debug.assert(e == .read);
+                    for (al.?.items) |i| {
+                        _ = try self.output(i);
                     }
                     
                 } else { // read elements from pipe and append to passed arrayList
+                    std.debug.assert(e == .write or e == .append);
                     self.err = error.ok;
                     loop: { 
                         var i: u32 = 0;
-                        try al.?.resize(0);
+                        if (e == .write)
+                            try al.?.resize(0);
                         while (true) : (i += 1) {
                             const d = self.peekTo(T) catch {
                                 break :loop;
@@ -177,8 +192,8 @@ pub fn Filters(comptime StageType: type, comptime T: type) type {
                     //std.debug.print("peekto ArrayList\n",.{});
                     const d = try self.peekTo(std.ArrayList(T));                    
                     // std.debug.print("ArrayList {any}\n",.{d});
-                    for (d.items) |e| {
-                        _ = try self.output(e);
+                    for (d.items) |i| {
+                        _ = try self.output(i);
                     }
                     _ = try self.readTo(std.ArrayList(T));
                 }                
@@ -246,7 +261,7 @@ pub fn Filters(comptime StageType: type, comptime T: type) type {
             if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
 
             var done:bool = false;
-            var s:u32 = 0;
+            var s:u32 = try self.inStream();
             self.selectInput(s) catch |e| {
                 if (e == error.noInStream) done = true;
             };
