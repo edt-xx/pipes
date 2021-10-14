@@ -146,6 +146,33 @@ pub fn TypeUnion(comptime list: anytype) type { // list is atuple of the types i
             }
             return false;
         }
+        
+        // create a typeUnion via allocator and set its value
+        //fn init(allocator: *std.mem.Allocator) TU {
+        //    var self: *TU = allocator.create(TU) catch unreachable;
+        //    return self.*;
+        //}
+        
+        pub fn list(alloc: *std.mem.Allocator, T: anytype, v: anytype) []TU {
+        
+            const inf = @typeInfo(@TypeOf(v)); // validate v is a tuple
+            if (inf != .Struct)
+                @compileError("Expected struct type");
+            if (!inf.Struct.is_tuple)
+                @compileError("Struct type must be a tuple type");
+                
+            const tuArray = [v.len]TU;
+            var self: *tuArray = alloc.create(tuArray) catch unreachable;
+    
+            for (self) | *tu, i | {
+                comptime var j = 0;
+                inline while (j<v.len) : (j+=1) {
+                    if (i==j)
+                        tu.put(@as(T[j],v[j]));
+                }
+            }
+            return self;
+        }
     };
 }
 
@@ -333,7 +360,7 @@ pub fn Stage(list: anytype) type {
         pub fn selectAnyInput(self: *StageType) !usize {
             // std.log.info("anyin {*} inC {*}\n",.{self, self.inC});
             if (countInstreams(self) > 0) {
-                // std.log.info("anyin {}", .{countInstreams(self)});
+                // std.log.info("anyin {*}", .{self.inC});
                 if (self.inC) |c| {
                     if (debugCmd) std.log.info("anyin pre {}_{s} in {} {}\n", .{ self.i, self.name, c.in, c.data });
                     if (c.in == .ok) {
@@ -359,6 +386,7 @@ pub fn Stage(list: anytype) type {
         }
           
         pub fn endStage(self: *StageType) void {
+            if (debugCmd) std.debug.print("end: {s}\n",.{self.name});
             for (self.n) |*c| {
                 if (c.dst == self) {
                     self.inC = null;
@@ -466,6 +494,13 @@ pub fn Mint(pp: anytype) type {
             }
         }
     }
+    
+    //inline for (pp) |_, i| {
+    //    if (lmap[i]) |l| {
+    //        @compileLog(i);
+    //        @compileLog(labels[l]);
+    //    }
+    //}
 
     comptime var ST:?type = null; // get the StageType from one of the Filter function calls
     comptime var arg_set: []const type = &[_]type{}; // build tuple of types for stage Fn and Args
@@ -504,6 +539,9 @@ pub fn Mint(pp: anytype) type {
 
         // connection nodes
         nodes: [nodesLen]Conn = [_]StageType.Conn{undefined} ** nodesLen,
+        
+        // the pipes last error (or void)
+        rc: anyerror!void = undefined,
 
         // associate the args with the stage's filters and a context struct.  Returns an arg_tuple
 
@@ -528,7 +566,7 @@ pub fn Mint(pp: anytype) type {
                                 //@compileLog(@typeInfo(@TypeOf(tuple[i][1][k+1])));
                                 //@compileLog(arg);
                                 switch (@typeInfo(@TypeOf(arg))) {
-                                    .Int, .Float, .ComptimeInt, .ComptimeFloat => { // constants
+                                    .Int, .Float, .ComptimeInt, .ComptimeFloat, .EnumLiteral => { // constants
                                         if (debugStart) std.debug.print("Int {} {}\n", .{ j, arg });
                                         tuple[i][1][k + 1] = arg;
                                     },
@@ -540,8 +578,8 @@ pub fn Mint(pp: anytype) type {
 
                                         // this would be much simpiler if runtime vars worked in nested tuples...
 
-                                        if (@TypeOf(tuple[i][1][k + 1]) == []const u8) { // tuple expects a string
-                                            tuple[i][1][k + 1] = arg;
+                                        if (@TypeOf(tuple[i][1][k + 1]) == []const u8 and arg[0] == "\"") { // expect a string
+                                            tuple[i][1][k + 1] = arg[1..];
                                         } else if (context != void) comptime {
                                             // use the type of the args tuple to decide what we are pointing too
                                             switch (@typeInfo(@TypeOf(tuple[i][1][k + 1]))) {
@@ -630,11 +668,9 @@ pub fn Mint(pp: anytype) type {
                         .Fn, .BoundFn => { // fn....
                             var name = @typeName(@TypeOf(elem));
                             //std.debug.print("{s}\n",.{name});
-                            const one = std.mem.indexOfPos(u8, name, 0, @typeName(StageType)).?;
-                            const two = std.mem.indexOfPos(u8, name, one + @typeName(StageType).len + 1, @typeName(StageType)).?;
-                            const start = std.mem.indexOfPos(u8, name, two + @typeName(StageType).len + 1, ")").?;
-                            const end = std.mem.indexOfPos(u8, name, start + 1, ")).").?;
-                            p[i].name = name[start + 2 .. end];
+                            const end = std.mem.indexOfPos(u8, name, 0, ")).Fn.return_type").?;
+                            const start = std.mem.lastIndexOf(u8,name[0..end],".").? + 1;
+                            p[i].name = name[start..end];
                             if (debugStart) std.debug.print("stg {} {s}\n", .{ i, p[i].name });
                         },
                         //.Pointer => { // *const u8...
@@ -664,17 +700,21 @@ pub fn Mint(pp: anytype) type {
             for (p) |item, i| {
                 const stg = if (item.name) |_| true else false;
 
-                if (stg and !item.end) {
+                if (stg and !item.end ) { // add nodes for each stage that does not have an end of stream
                     nodes[j].set(p, i, 0, i + 1, 0);
                     j += 1;
                 }
 
-                if (lmap[i]) |lbl| {
+                if (lmap[i]) |lbl| {  // get the label index of this pp step
                     if (map[lbl]) |*k| {
                         if (!stg) {
                             if (item.end) {
-                                nodes[j - 1].set(p, i - 1, 0, k.to, k.sin);
-                                k.set(p, k.from, k.sout, k.to, k.sin + 1);
+                                if (i == 0 or !p[i-1].end) { // if previous item did not have an end
+                                    nodes[j - 1].set(p, i - 1, 0, k.to, k.sin); 
+                                    k.set(p, k.from, k.sout, k.to, k.sin + 1);
+                                } else { // this is a null output stream
+                                    k.set(p, k.from, k.sout+1, k.to, k.sin);
+                                }
                             } else {
                                 nodes[j].set(p, k.from, k.sout, i + 1, 0);
                                 j += 1;
@@ -694,7 +734,7 @@ pub fn Mint(pp: anytype) type {
                  }
                 if (debugStart) std.debug.print("{} {}\n", .{ i, j });
             }
-
+                                                                    
             // save the node slice in the stages;
             for (p) |_, i| {
                 p[i].n = self.nodes[0..j];
@@ -702,16 +742,7 @@ pub fn Mint(pp: anytype) type {
 
             // debug
             if (debugStart) {
-                for (p) |s| {
-                    if (s.name) |_|
-                        std.debug.print("{} {s} {s} {} {*} {*} {*}\n", .{ s.i, s.label, s.name, s.end, s.n, s.inC, s.outC })
-                    else
-                        std.debug.print("{} {s} {s} {} \n", .{ s.i, s.label, s.name, s.end });
-                }
-
-                var k: u32 = 0;
-                while (k < j) : (k += 1) {
-                    const c = nodes[k];
+                for (self.nodes[0..j]) |c, k| {
                     std.debug.print("{} {s}({}),{} -> {s}({}),{}\n", .{ k, p[c.from].name, c.from, c.sout, p[c.to].name, c.to, c.sin });
                 }
             }
@@ -723,17 +754,28 @@ pub fn Mint(pp: anytype) type {
 
         pub fn run(self: *ThisPipe, context: anytype) !void {
             const tuple = self.args(context);
-            var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-            defer arena.deinit();
-            const allocator = &arena.allocator;
-
+            //var arena3 = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+            //defer arena3.deinit();
+            
             var p = self.p[0..]; // use slices
             var nodes = self.p[0].n;
-
-            // set starting input/output streams to 0 & connection status to .ok
+            self.rc = .{};
+            
+            const allocator = p[0].allocator;
+            
+            // set starting input/output streams to lowest connect streams (usually 0 - but NOT always)
             for (nodes) |*n| {
-                if (n.sout == 0) n.src.outC = n;
-                if (n.sin == 0) n.dst.inC = n;
+            
+                if (n.src.outC) |c| {
+                    if (n.sout < c.sout) n.src.outC = n;
+                } else
+                    n.src.outC = n;
+                    
+                if (n.dst.inC) |c| {
+                    if (n.sin < c.sin) n.dst.inC = n;
+                } else
+                    n.dst.inC = n;
+                
                 n.in = .ok;
             }
 
@@ -791,7 +833,7 @@ pub fn Mint(pp: anytype) type {
 
                     // dispatch a pending anyinput
                     if (c.dst.state == .anyinput and c.in != .ok and c.in != .sever and c.dst.commit == commit) {
-                        if (debugDisp) {
+                        if (debugLoop) {
                             if (state == 3)
                                 loop += 1
                             else {
@@ -800,13 +842,14 @@ pub fn Mint(pp: anytype) type {
                             }
                         }
                         c.dst.inC = c;
-                        if (debugLoop) std.log.info("pre a dst.state {} {}_{s} sin {} \n\n", .{ c.dst.state, c.dst.i, c.dst.name, c.sin });
+                        if (debugDisp) std.log.info("pre a dst.state {} {}_{s} sin {} \n\n", .{ c.dst.state, c.dst.i, c.dst.name, c.sin });
                         resume c.dst.frame;
                         continue :running;
                     }
 
                     // compete a sever after any data in the node is consumed
                     if ((c.src.outC == null and c.in == .ok) or (c.dst.inC == null and c.in == .ok)) {
+                        if (debugDisp) std.log.info("pre sever {} {}_{s} sin {} \n\n", .{ c.dst.state, c.dst.i, c.dst.name, c.sin });
                         c.in = .sever;
                         severed += 1;
                         continue :running;
@@ -875,8 +918,9 @@ pub fn Mint(pp: anytype) type {
                         } else if (severed < nodes.len) {
                             std.debug.print("\nStalled! {s} rc {}\n", .{ s.name, err });
                             for (nodes) |*c| {
-                                std.debug.print("start {*} src {}_{s} {} {*} {} {} dst {}_{s} {} {*} {} {} in {} {}\n", .{ c, c.src.i, c.src.name, c.sout, c.src.outC, c.src.state, c.src.commit, c.dst.i, c.dst.name, c.sin, c.dst.inC, c.dst.state, c.dst.commit, c.in, c.data });
+                                std.debug.print("src {}_{s} {} {} {} dst {}_{s} {} {} {} in {} {}\n", .{ c.src.i, c.src.name, c.sout, c.src.state, c.src.commit, c.dst.i, c.dst.name, c.sin, c.dst.state, c.dst.commit, c.in, c.data });
                             }
+                            self.rc = err;
                             return err;
                         }
                     }
@@ -887,7 +931,7 @@ pub fn Mint(pp: anytype) type {
             if (debugStart) {
                 std.debug.print("\n{}\n", .{StageType});
                 for (nodes) |*c| {
-                    std.debug.print("start {*} src {}_{s} {} {*} {} {} dst {}_{s} {} {*} {} {} in {} {}\n", .{ c, c.src.i, c.src.name, c.sout, c.src.outC, c.src.state, c.src.commit, c.dst.i, c.dst.name, c.sin, c.dst.inC, c.dst.state, c.dst.commit, c.in, c.data });
+                    std.debug.print("src {}_{s} {} {} {} dst {}_{s} {} {} {} in {} {}\n", .{ c.src.i, c.src.name, c.sout, c.src.state, c.src.commit, c.dst.i, c.dst.name, c.sin, c.dst.state, c.dst.commit, c.in, c.data });
                 }
             }
 
