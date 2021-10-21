@@ -196,7 +196,7 @@ pub fn ConnType(comptime S: type, comptime TU: type) type {
         dst: *S = undefined, // used by input
         to: usize = 0,
         sin: usize = 0,
-        //next: ?*Conn = null,
+        next: ?*Conn = null,
 
         fn set(self: *Conn, p: []S, f: usize, o: usize, t: usize, s: usize) void {
             self.from = f;
