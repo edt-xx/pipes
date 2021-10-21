@@ -1,5 +1,7 @@
 const std = @import("std");
 
+//const filters = @import("filters");
+
 const build_options = @import("build_options");
 const debugDisp = build_options.debugDisp;
 const debugLoop = build_options.debugLoop;
@@ -13,21 +15,24 @@ const State = enum(u4) {
     peekTo,
     readTo,
     output,
+    call,
     start,
     run,
     done,
     anyinput,
     any,
+    dummy,
 };
 
 const stageError = error{
     ok,
+    finished,
+    active,
     endOfStream,
     noInStream,
     noOutStream,
     outOfBounds,
-    finished,
-    active,
+    pipeStall,
 };
 
 const Message = enum(u2) {
@@ -36,12 +41,12 @@ const Message = enum(u2) {
     sever,
 };
 
-// pub fn ReturnOf(comptime func: anytype) type {
-//     return switch (@typeInfo(@TypeOf(func))) {
-//         .Fn, .BoundFn => |fn_info| fn_info.return_type.?,
-//         else => unreachable,
-//     };
-// }
+pub fn ReturnOf(comptime func: anytype) type {
+     return switch (@typeInfo(@TypeOf(func))) {
+         .Fn, .BoundFn => |fn_info| fn_info.return_type.?,
+         else => unreachable,
+    };
+}
 
 // we use TypeUnion to store the values passed between stages.  We define the Stage by passing a tuple of types with
 // the types valid to use in the pipe's TypeUnion(s).  We use Filters to create non generic versions of the filter functions
@@ -173,6 +178,7 @@ pub fn TypeUnion(comptime list: anytype) type { // list is atuple of the types i
             }
             return self;
         }
+
     };
 }
 
@@ -181,16 +187,16 @@ pub fn TypeUnion(comptime list: anytype) type { // list is atuple of the types i
 pub fn ConnType(comptime S: type, comptime TU: type) type {
     return struct {
         pub const Conn = @This();
-
-        next: ?*Conn = null,
+        
+        data: TU = undefined,
+        in: Message = undefined,
         src: *S = undefined, // used by output
         from: usize = 0,
         sout: usize = 0,
         dst: *S = undefined, // used by input
         to: usize = 0,
         sin: usize = 0,
-        in: Message = undefined,
-        data: TU = undefined,
+        //next: ?*Conn = null,
 
         fn set(self: *Conn, p: []S, f: usize, o: usize, t: usize, s: usize) void {
             self.from = f;
@@ -199,9 +205,6 @@ pub fn ConnType(comptime S: type, comptime TU: type) type {
             self.to = t;
             self.dst = &p[t]; // stage input
             self.sin = s;
-            //self.in=.ok;
-            //if (o==0) self.src.outC = self;
-            //if (s==0) self.dst.inC = self;
         }
     };
 }
@@ -209,29 +212,55 @@ pub fn ConnType(comptime S: type, comptime TU: type) type {
 // Used to create a type for stages that can be used with any of the types in the list, which needs to be a tuple of types.
 // A stage is defined as a filter, its args and connections
 
-pub fn Stage(list: anytype) type {
+//pub const Saver = struct {
+//    tup: anytype = .{}, // callpipe_tuples
+//    ctx: []const type = &[_]type{}, // callpipe context: struct type
+//    nth: comptime_int = 0,
+//};
+    
+pub fn _Stage(comptime Make:*Z, list: anytype) type {
+
+    //comptime var TS = Saver{};
+    
     return struct {
         pub const StageType = @This();
         pub const TU = TypeUnion(list);
         pub const Conn = ConnType(StageType, TU);
         
-        pub var pipeAddr:usize = 0;
-
         outC: ?*Conn = null,
         inC: ?*Conn = null,
         state: State = undefined,
         commit: isize = -90909090,
         frame: anyframe = undefined,
-        rc: anyerror!void = undefined,
         err: stageError = error.ok,
         n: []Conn = undefined,
-        name: ?[]const u8 = null,
+        name: ?[]const u8 = null,        
         end: bool = false,
         i: usize = undefined,
-        allocator: *std.mem.Allocator = undefined,
-
-        // these are the commands that can be used inside filters.  Filters defines what a pipe stage does.
-
+        allocator: *std.mem.Allocator = undefined,        
+        pipeAddr:usize = 0,
+        PNIdx:usize = undefined,
+        
+        pub fn call(self: *StageType, ctx:anytype, tup:anytype) !void {
+            
+            const PT = Make.getPT();
+            inline for (PT) | T, i | {
+                if (i == self.PNIdx) {
+                    const parent = @intToPtr(*T,self.pipeAddr); // parent pipe so we can adjust nodes
+                    _ = parent;
+                    const CallPipe = Make.Mint(tup);
+                    var callpipe = CallPipe.init(self.allocator);
+                    try callpipe.run(ctx);
+                    _ = parent;
+                }        
+            }
+            suspend {
+                self.state = .call;             // tell dispatcher to run the pipe
+                self.frame = @frame();
+            }
+            self.state = .done;
+        }
+        
         pub fn inStream(self: *StageType) !usize {
             if (self.inC) |c|
                 return c.sin;
@@ -407,6 +436,14 @@ pub fn Stage(list: anytype) type {
                     self.outC = null;
                 }
             }
+            const PT = Make.getPT();
+            inline for (PT) | T, i | {
+                if (i == self.PNIdx) {
+                    const parent = @intToPtr(*T,self.pipeAddr); // parent pipe so we can adjust nodes
+                    if (@errorToInt(self.err) > @errorToInt(parent.rc))
+                        parent.rc = self.err;
+                }        
+            }
             return;
         }
         
@@ -450,22 +487,68 @@ pub fn Stage(list: anytype) type {
     };
 }
 
-pub fn run(comptime context:type, pp:anytype) !void {
+pub fn _run(comptime Make: *Z, comptime context:type, pp:anytype) !void {
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = &arena.allocator;
     
-    const thisPipe = Mint(pp).init(allocator);
+    const thisPipe = Make.Mint(pp).init(allocator);
     return thisPipe.run(context);
     
 }
 
-// Once we have defined the Stage & Filters types, we need to use a pipe tuple and prepare to run it using a
-// PipeInstance.  The PipeInstances is used to set the args for a pipe using struct(s) as context blocks.  Any required
-// args are set, the run funcion should be called to execute the pipe.
+// Once we have defined the Stage & Filters types, we need to create a pipeType using Mint.  The PipeType
+// is used to set the args for a pipe using struct(s) as context blocks.  Any required args are set, 
+// the run funcion should be called to execute the pipe.
 
-pub fn Mint(pp: anytype) type {
+// Mint creates a tuple, arg_set, of stage arguement types, sets up some label mapping, and returns a PipeType.
+// init creates a PipeType using an allocator, then connects the stages using connectors and the label mapping. 
+// run uses arg_set to create a tuple of values for the pipe stages arguements, fills in the values, and runs the pipe
+
+pub const Z = struct {
+
+    PT: []const type = &[_]type{},
+    //tup: anytype = .{}, // callpipe_tuples
+    //ctx: []const type = &[_]type{}, // callpipe context: struct type
+    //nth: comptime_int = 0,
+    
+    //pub fn Filters(comptime _:*Z, comptime StageType: type, comptime SelectedType: type) type {
+    //    return filters.Filters(StageType, SelectedType);
+    //}
+    
+    pub fn Mint(comptime self:*Z, pp:anytype) type {
+        // @compileLog("recursive");
+        const Pipe = _Mint(self,pp,self.PT.len);
+        self.PT = &[_]type{Pipe} ++ self.PT;
+        return Pipe;
+    }
+
+    pub fn Stage(comptime self:*Z, list:anytype) type {
+        return _Stage(self, list);
+    }
+    
+    pub fn run(comptime self:*Z, comptime context:type, pp:anytype) !void {
+        return try _run(self, context, pp);
+    }
+    
+    pub fn getPT(comptime self:*Z) []const type {
+        return self.PT;
+    }
+    
+    //pub fn getTup(comptime self:*Z) @TypeOf(self.tup) {
+    //    return self.tup;
+    //}
+    //
+    //pub fn getCtx(comptime self:*Z) []const type {
+    //    return self.ctx;
+    //}
+    
+};
+
+fn _Mint(comptime Make:*Z,pp:anytype,pN:usize) type {
+
+    _ = Make;
 
     comptime var lmap = [_]?u8{null} ** pp.len; // mapping for stg to label
     comptime var nodesLen = pp.len; // number of nodes for the pipe
@@ -513,7 +596,7 @@ pub fn Mint(pp: anytype) type {
     //        @compileLog(labels[l]);
     //    }
     //}
-
+    
     comptime var ST:?type = null; // get the StageType from one of the Filter function calls
     comptime var arg_set: []const type = &[_]type{}; // build tuple of types for stage Fn and Args
     inline for (pp) |stg, i| { // fill in the args types
@@ -540,12 +623,21 @@ pub fn Mint(pp: anytype) type {
     
     std.debug.assert(ST != null);
     
+    //comptime var z = ZZ{};
+    //comptime var PT: []const type = &[_]type{}; // CallPipe type: Mint(callpipe_tuple)
+    
     return struct { // return an instance of ThisPipe
         const StageType = ST.?; // The StageType as extracted from a Filter function
         const Conn = StageType.Conn; // list of connections
         const ThisPipe = @This(); // this pipe's type
         const pipe = pp; // the pipe source tuple
-
+        const pNum = pN;
+        //const ParentPipe = PP;
+    
+        //var pipes = [_]?*ThisPipe{null} ** 5;
+        // if (old == null)
+        //parent:?*ParentPipe = null,
+        
         // stages/filter of the pipe
         p: [pipe.len]StageType = [_]StageType{undefined} ** pipe.len,
 
@@ -553,14 +645,16 @@ pub fn Mint(pp: anytype) type {
         nodes: [nodesLen]Conn = [_]StageType.Conn{undefined} ** nodesLen,
         
         // the pipes last error (or void)
-        rc: anyerror!void = undefined,
-
+        rc: anyerror = error.ok,
+        
+        theArgs: std.meta.Tuple(arg_set) = undefined,
+        
         // associate the args with the stage's filters and a context struct.  Returns an arg_tuple
-
+        
         fn args(self: *ThisPipe, context: anytype) std.meta.Tuple(arg_set) {
 
             //tuple for calling fn(s) allong with the arguement tuples reguired
-            var tuple: std.meta.Tuple(arg_set) = undefined;
+            var tuple = self.theArgs;
 
             // fill in the args tuple adding the fn(s) and argument values, using the passed contect structure block
             inline for (pipe) |stg, i| {
@@ -665,20 +759,21 @@ pub fn Mint(pp: anytype) type {
 
             return tuple;
         }
-
-        // setup the pipe structs.  Only call once per PipeInstances.  An allocator is requied for the needed storage.
-
+        
+        
         pub fn init(allocator: *std.mem.Allocator) *ThisPipe {
+        
             var self: *ThisPipe = allocator.create(ThisPipe) catch unreachable;
             
-            StageType.pipeAddr =  @ptrToInt(self);
+            //self.parent = Parent;
             
             var p = self.p[0..]; // simipify life using slices
             var nodes = self.nodes[0..];
-
+                        
+            //@compileLog(p.len);
             inline for (pipe) |stg, i| {
-                p[i] = StageType{ .i = i, .allocator = allocator }; // ensure default values are set
-               
+                p[i] = StageType{ .i=i, .allocator=allocator, .PNIdx = pNum, .pipeAddr = @ptrToInt(self) };
+                                
                 inline for (stg) |elem, j| { // parse the pipe
                     switch (@typeInfo(@TypeOf(elem))) {
                         .Fn, .BoundFn => { // fn....
@@ -704,7 +799,7 @@ pub fn Mint(pp: anytype) type {
             // const buffalloc = &std.heap.FixedBufferAllocator.init(&buffer).allocator;
             // var map = std.hash_map.StringHashMap(Conn).init(buffalloc);
             // defer map.deinit();
-
+            //@compileLog(nodes.len);
             var map: [nodesLen]?Conn = .{null} ** nodesLen;
 
             // create the pipe's nodes - all fields are initialized by .set or in .run so no Conn{} is needed
@@ -758,7 +853,8 @@ pub fn Mint(pp: anytype) type {
                     std.debug.print("{} {s}({}),{} -> {s}({}),{}\n", .{ k, p[c.from].name, c.from, c.sout, p[c.to].name, c.to, c.sin });
                 }
             }
-
+            //@compileLog("done");
+            //std.debug.print("{*}\n{*}\n",.{p,nodes});
             return self;
         }
 
@@ -771,7 +867,7 @@ pub fn Mint(pp: anytype) type {
             
             var p = self.p[0..]; // use slices
             var nodes = self.p[0].n;
-            self.rc = .{};
+            self.rc = error.ok;
             
             const allocator = p[0].allocator; // use the same allocator used to allocate ThisPipe
             
@@ -796,7 +892,7 @@ pub fn Mint(pp: anytype) type {
                 if (s.name) |_| {
                     s.commit = -@intCast(isize, (i + 1));
                     s.state = .start;
-                    s.rc = error.active;
+                    //s.rc = error.active;
                     s.err = error.ok;
                 }
             }
@@ -858,13 +954,38 @@ pub fn Mint(pp: anytype) type {
                         resume c.dst.frame;
                         continue :running;
                     }
-
+                   
                     // compete a sever after any data in the node is consumed
                     if ((c.src.outC == null and c.in == .ok) or (c.dst.inC == null and c.in == .ok)) {
                         if (debugDisp) std.log.info("pre sever {} {}_{s} sin {} \n\n", .{ c.dst.state, c.dst.i, c.dst.name, c.sin });
                         c.in = .sever;
                         severed += 1;
                         continue :running;
+                    }
+                    
+                    //std.debug.print(".call dst {} {}\n      src {} {} - {} {}\n",.{c.dst.state, c.dst.commit, c.src.state, c.src.commit, commit, c.in});
+                    if ((c.dst.state == .call or c.src.state == .call) and c.in != .sever ) {
+                        const stage = if (c.dst.state == .call) c.dst else c.src;                        
+                        if (stage.commit == commit) {
+                            //const cpTuples = Make.tup;
+                            //std.debug.print(".call {} {} {}",.{stage.cpIdx, Make.nth, Make.getTup()});
+                            //inline for (Make.getTup()) |tup, i| {   
+                            //    if (stage.cpIdx == i) {
+                                    //_ = tup;
+                                    //std.debug.print(".call {}\n",.{tup});
+                                    //const CallPipe = Make.Call(tup);
+                                    //_ = CallPipe;
+                                    //var callpipe = CallPipe.init(stage.allocator);
+                                    //_ = callpipe;
+                                    ////stage.pipeAddr = @ptrToInt(callpipe);
+                                    //const ctx = Make.getCtx()[i];
+                                    //callpipe.theArgs = callpipe.args(ctx);
+                                    //std.debug.print("put {*}\n {}\n {}\n",.{callpipe,Make.getPT()[0],CallPipe.pipe});
+                              //  }
+                            // }
+                            resume c.dst.frame;
+                            continue :running;
+                        }
                     }
 
                     // start a stage fliter from connection destination
@@ -874,9 +995,11 @@ pub fn Mint(pp: anytype) type {
                         comptime var j = 0;
                         inline while (j < p.len) : (j += 1) {
                             if (@TypeOf(tuple[j][0]) != void) { // prevent inline from generating void calls
-                                if (c.dst.i == j)
-                                    _ = @asyncCall(allocator.alignedAlloc(u8, 16, @frameSize(tuple[j][0])) catch
-                                        unreachable, &self.p[j].rc, tuple[j][0], tuple[j][1]);
+                                if (c.dst.i == j) {
+                                    const f = pipe[j][if (@typeInfo(@TypeOf(pipe[j][0])) == .EnumLiteral) 1 else 0];
+                                    _ = @asyncCall(allocator.alignedAlloc(u8, 16, @sizeOf(@Frame(f))) catch
+                                        unreachable, {}, f, tuple[j][1]);
+                                }
                             }
                         }
                         continue :running;
@@ -889,9 +1012,12 @@ pub fn Mint(pp: anytype) type {
                         comptime var j = 0;
                         inline while (j < p.len) : (j += 1) {
                             if (@TypeOf(tuple[j][0]) != void) { // prevent inline from generating void calls
-                                if (c.src.i == j)
-                                    _ = @asyncCall(allocator.alignedAlloc(u8, 16, @frameSize(tuple[j][0])) catch
-                                        unreachable, &self.p[j].rc, tuple[j][0], tuple[j][1]);
+                                if (c.src.i == j) {
+                                    const f = pipe[j][if (@typeInfo(@TypeOf(pipe[j][0])) == .EnumLiteral) 1 else 0];
+                                    //const r = ReturnOf(f);
+                                    _ = @asyncCall(allocator.alignedAlloc(u8, 16, @sizeOf(@Frame(f))) catch
+                                        unreachable, {}, f, tuple[j][1]);
+                                }
                             }
                         }
                         continue :running;
@@ -922,18 +1048,16 @@ pub fn Mint(pp: anytype) type {
                 // check completion and detect stalls
                 for (p) |*s| {
                     if (debugDisp) std.log.info("{s} {}", .{ s.name, s.rc });
-                    if (s.rc) |_| {
-                        continue;
-                    } else |err| {
-                        if (err == error.endOfStream or s.commit == -90909090) {
+                    if (s.err != error.ok) {
+                        if (s.err == error.endOfStream or s.commit == -90909090) {
                             continue;
                         } else if (severed < nodes.len) {
-                            std.debug.print("\nStalled! {s} rc {}\n", .{ s.name, err });
+                            std.debug.print("\nStalled! {s} rc {}\n", .{ s.name, s.err });
                             for (nodes) |*c| {
-                                std.debug.print("src {}_{s} {} {} {} dst {}_{s} {} {} {} in {} {}\n", .{ c.src.i, c.src.name, c.sout, c.src.state, c.src.commit, c.dst.i, c.dst.name, c.sin, c.dst.state, c.dst.commit, c.in, c.data });
+                                std.debug.print("src {}_{s} {} {} {} dst {}_{s} {} {} {} in {} {}\n", .{ c.src.i, c.src.name, c.sout, c.src.state, c.src.commit, c.dst.i, c.dst.name, c.sin, c.dst.state, c.dst.commit, c.in,  c.data.type });
                             }
-                            self.rc = err;
-                            return err;
+                            self.rc = error.pipeStall;
+                            return self.rc;
                         }
                     }
                 }
@@ -951,3 +1075,4 @@ pub fn Mint(pp: anytype) type {
         }
     };
 }
+

@@ -11,17 +11,18 @@ const debugStart = build_options.debugStart;
 // that are not generic.  We do not have the functions in StageType since we generate the args for the functions via
 // PipeInstance.args and can set the first arg of the non generic filter function to the StageType used by the pipe.        
 
-pub fn Filters(comptime StageType: type, comptime Selected: type) type {
+pub fn Filters(comptime StageType: type, comptime SelectedType: type) type {
 
-    std.debug.assert(StageType.TU.inUnion(Selected));
-
+    std.debug.assert(StageType.TU.inUnion(SelectedType));
+    
     return struct {
         pub const S = StageType;
-        pub const T = Selected;
-
+        pub const T = SelectedType;
+        pub const F = @This();
+        
         // we need to return the global error set. When used, the fn type includes the name of the function.  We use this
         // to set the name of the stage...
-
+        
         pub fn exactdiv(self: *S, d: T) callconv(.Async) !void {
             defer 
                 self.endStage();
@@ -38,34 +39,40 @@ pub fn Filters(comptime StageType: type, comptime Selected: type) type {
                         if (err != error.noOutStream) return err;  
                 }
                 if (debugStages) std.log.info("div out {}_{s} {*}", .{ self.i, self.name, self.outC });
-                    _ = self.output(i) catch |err| 
-                if (err != error.noOutStream) return err;
-                
+                _ = self.output(i) catch |err| 
+                    if (err != error.noOutStream) return err;                
                 _ = try self.readTo(T);
             }
         }
         
-        // send items to selected output stream using the index of the type in the items typeUnion
+        // send items to selected output stream using the index of the type in the item's typeUnion
         pub fn collateTypes(self: *S) callconv(.Async) !void {
             defer 
                 self.endStage();
+                
+            const y = struct {
+                pub var a:u64 = 30;
+            };
+                
+            try self.call(y,.{ 
+                .{ gen, .{"a"} }, 
+                .{ console, ._ } 
+            });
                 
             if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
                        
             while (true) {
                 const tu = try self.peekTo(S.TU);
-                //std.debug.print("{any} {}\n",.{tu,@enumToInt(tu.type)});
                 self.selectOutput(@enumToInt(tu.type)) catch |err|
                      if (err != error.noOutStream) return err;
                 if (self.outC != null) { // if an output stream is selected
-                    // std.debug.print("try output {} {any}\n",.{@enumToInt(tu.type),tu});
                     _ = try self.output(tu);
                 }
                 _ = try self.readTo(S.TU);
             }        
         }
         
-        pub fn sink(self: *S) callconv(.Async) !void {
+        pub fn hole(self: *S) callconv(.Async) !void {
             defer 
                 self.endStage();
                 
@@ -82,7 +89,6 @@ pub fn Filters(comptime StageType: type, comptime Selected: type) type {
             
             std.debug.assert(T == []const u8 or T == ?[]const u8 or
                              T == [:0]const u8 or T == ?[:0]const u8);
-            
             while (true) {
                 var i = try self.peekTo(T);
                 if (std.mem.indexOfPos(u8, i, 0, d)) {
@@ -120,7 +126,16 @@ pub fn Filters(comptime StageType: type, comptime Selected: type) type {
         pub fn slice(self: *S, slc: ?[]T) callconv(.Async) !void {
             defer 
                 self.endStage();
-            
+           
+            //const y = struct {
+            //    pub var a:u64 = 7;
+            //};
+            //    
+            //try self.call(y,.{ 
+            //    .{ gen, .{"a"} }, 
+            //    .{ console, ._} 
+            //});
+           
             if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
             
             if (slc == null) {
@@ -315,6 +330,8 @@ pub fn Filters(comptime StageType: type, comptime Selected: type) type {
         pub fn gen(self: *S, limit: T) callconv(.Async) !void {
             defer 
                 self.endStage();
+                
+            //std.debug.print("{*}\n",.{@intToPtr(S.PS.getPT(), self.pipeAddr)});   // extract a PipeType
             
             if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
 
@@ -324,5 +341,6 @@ pub fn Filters(comptime StageType: type, comptime Selected: type) type {
                 try self.output(i);
             }
         }
+        
     };
 }
