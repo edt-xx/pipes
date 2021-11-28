@@ -19,8 +19,9 @@ const State = enum(u4) {
     start,
     run,
     done,
+    sever,
     anyinput,
-    any,
+    commit,
     dummy,
 };
 
@@ -196,68 +197,96 @@ pub fn ConnType(comptime S: type, comptime TU: type) type {
         dst: *S = undefined, // used by input
         to: usize = 0,
         sin: usize = 0,
-        next: ?*Conn = null,
+        //next: ?*Conn = null,    // unused but removing it causes stalls (WHY?)
 
         fn set(self: *Conn, p: []S, f: usize, o: usize, t: usize, s: usize) void {
-            self.from = f;
-            self.src = &p[f]; // stage output
-            self.sout = o;
-            self.to = t;
-            self.dst = &p[t]; // stage input
-            self.sin = s;
+            self.from = f;      // only used when building connectons (to be removed)
+            self.src = &p[f];   // stage output
+            self.sout = o;      // stream number
+            self.to = t;        // only used when building connectons (to be removed)
+            self.dst = &p[t];   // stage input
+            self.sin = s;       // stream number
         }
     };
 }
 
 // Used to create a type for stages that can be used with any of the types in the list, which needs to be a tuple of types.
 // A stage is defined as a filter, its args and connections
-
-//pub const Saver = struct {
-//    tup: anytype = .{}, // callpipe_tuples
-//    ctx: []const type = &[_]type{}, // callpipe context: struct type
-//    nth: comptime_int = 0,
-//};
     
 pub fn _Stage(comptime Make:*Z, list: anytype) type {
 
-    //comptime var TS = Saver{};
-    
     return struct {
+    
         pub const StageType = @This();
         pub const TU = TypeUnion(list);
         pub const Conn = ConnType(StageType, TU);
         
-        outC: ?*Conn = null,
-        inC: ?*Conn = null,
+        outC: ?*Conn = null,            // output conn
+        inC: ?*Conn = null,             // input conn 
+        fwdC: ?*Conn = null,
+        bwdC: ?*Conn = null,
         state: State = undefined,
         commit: isize = -90909090,
         frame: anyframe = undefined,
         err: stageError = error.ok,
-        n: []Conn = undefined,
-        name: ?[]const u8 = null,        
+        n: []Conn = undefined,          // connections used by this stage (might be removable)
+        name: ?[]const u8 = null,       // name of the stage, may dissapear as we get it via questionable hack        
         end: bool = false,
         i: usize = undefined,
-        allocator: *std.mem.Allocator = undefined,        
-        pipeAddr:usize = 0,
-        PNIdx:usize = undefined,
+        allocator: *std.mem.Allocator = undefined,  // allocator in use for this pipe      
+        pipeAddr:usize = 0,                         // Use Make.getPT() and PTIdx to get a pointer to the parent pipe
+        PTIdx:usize = undefined,
         
         pub fn call(self: *StageType, ctx:anytype, tup:anytype) !void {
             
             const PT = Make.getPT();
             inline for (PT) | T, i | {
-                if (i == self.PNIdx) {
+                if (i == self.PTIdx) {
                     const parent = @intToPtr(*T,self.pipeAddr); // parent pipe so we can adjust nodes
                     _ = parent;
                     const CallPipe = Make.Mint(tup);
-                    var callpipe = CallPipe.init(self.allocator);
+                    //std.debug.print("call {any}\n",.{CallPipe.pipe});
+                    var callpipe = CallPipe.init(self.allocator); // create callpipe instance
+                    //var save = Conn{};
+                    
+                    if (self.outC == null and callpipe.outIdx < 255)
+                        return error.noOutStream;
+                        
+                    if (self.inC == null and callpipe.inIdx < 255)
+                        return error.noInStream;
+                    
+                    //if (callpipe.outIdx < 255) {
+                    //    save.src = self.outC.?.src;
+                    //    save.from = self.outC.?.from;
+                    //    callpipe.p[callpipe.outIdx].outC = self.outC;
+                    //    self.outC.?.src = &callpipe.p[callpipe.outIdx];
+                    //    self.outC.?.from = callpipe.outIdx;
+                    //}
+                    //if (callpipe.inIdx < 255) {
+                    //    save.dst = self.inC.?.dst;
+                    //    save.to = self.inC.?.to;
+                    //    callpipe.p[callpipe.inIdx].inC = self.inC;
+                    //    self.inC.?.dst = &callpipe.p[callpipe.inIdx];
+                    //    self.inC.?.to = callpipe.inIdx;
+                    //}
                     try callpipe.run(ctx);
+                    
+                    //if (callpipe.outIdx < 255) { // restore output
+                    //    self.outC.?.src = save.src;
+                    //    self.outC.?.from = save.from;                    
+                    // }
+                    //if (callpipe.inIdx < 255) { //restore input
+                    //    self.inC.?.dst = save.dst;
+                    //    self.inC.?.to = save.to;
+                    //}
                     _ = parent;
                 }        
             }
-            suspend {
-                self.state = .call;             // tell dispatcher to run the pipe
-                self.frame = @frame();
-            }
+
+            //suspend {
+            //    self.state = .call;             // tell dispatcher to run the pipe
+            //    self.frame = @frame();
+            //}
             self.state = .done;
         }
         
@@ -279,6 +308,7 @@ pub fn _Stage(comptime Make:*Z, list: anytype) type {
                 if (debugCmd) std.log.info("peekTo {*} in {} {}\n", .{ c, c.in, c.data });
                 while (c.in == .ok) {
                     suspend {
+                        //self.fwdC = c;
                         self.state = .peekTo;
                         self.frame = @frame();
                     }
@@ -335,6 +365,7 @@ pub fn _Stage(comptime Make:*Z, list: anytype) type {
             self.state = .done;
             if (self.inC) |c| {
                 if (c.in == .data) {
+                    self.bwdC = c;
                     c.in = .ok;
                     return c.data.get(T);
                 } else {
@@ -360,6 +391,7 @@ pub fn _Stage(comptime Make:*Z, list: anytype) type {
             if (self.outC) |c| {
                 if (debugCmd) std.log.info("output {*} {} in {} {}\n", .{ c, c.sout, c.in, v });
                 if (c.in == .ok) {
+                    self.fwdC = c;
                     c.in = .data;
                     c.data.put(v);
                     return;
@@ -379,6 +411,7 @@ pub fn _Stage(comptime Make:*Z, list: anytype) type {
         pub fn severOutput(self: *StageType) !void {
             if (self.outC) |_| {
                 self.outC = null;
+                self.state = .sever;
             } else {
                 self.err = error.noOutStream;
                 return self.err;
@@ -388,6 +421,7 @@ pub fn _Stage(comptime Make:*Z, list: anytype) type {
         pub fn severInput(self: *StageType) !void {
             if (self.inC) |_| {
                 self.inC = null;
+                self.state = .sever;
             } else {
                 self.err = error.noInStream;
                 return self.err;
@@ -412,15 +446,11 @@ pub fn _Stage(comptime Make:*Z, list: anytype) type {
                     }
                 }
                 self.state = .done;
-                if (self.inC) |c| {
-                    if (debugCmd) std.log.info("anyin post {}_{s} {} in {} {}\n", .{ self.i, self.name, c.sin, c.in, c.data });
+                if (self.inC) |c| {         
                     if (c.in == .data) {
                         return c.sin;
-                    } else {
-                        self.err =  error.endOfStream;
-                        return self.err;
                     }
-                }
+                }                
             }
             self.err = error.noInStream;
             return self.err;
@@ -430,25 +460,34 @@ pub fn _Stage(comptime Make:*Z, list: anytype) type {
             if (debugCmd) std.debug.print("end: {s}\n",.{self.name});
             for (self.n) |*c| {
                 if (c.dst == self) {
+                    if (self.inC == c)
+                        c.dst.bwdC = c;
                     self.inC = null;
                 }
                 if (c.src == self) {
+                    if (self.outC == c)
+                        c.src.fwdC = c;
                     self.outC = null;
                 }
+                self.state = .sever;
             }
             const PT = Make.getPT();
             inline for (PT) | T, i | {
-                if (i == self.PNIdx) {
-                    const parent = @intToPtr(*T,self.pipeAddr); // parent pipe so we can adjust nodes
+                if (i == self.PTIdx) {
+                    const parent = @intToPtr(*T,self.pipeAddr);             // parent pipe so we can track pipe.rc
                     if (@errorToInt(self.err) > @errorToInt(parent.rc))
                         parent.rc = self.err;
                 }        
             }
+            self.commit = 90909090;
             return;
         }
         
         pub fn ok(self: *StageType) !void {
-            return if (self.err == error.ok or self.err == error.endOfStream) .{} else self.err;
+            return  if (self.err == error.ok or self.err == error.endOfStream or self.err == error.noInStream) 
+                        .{}
+                    else 
+                        self.err;
         }
 
         fn setinC(self: *StageType, i: usize) !void {
@@ -498,25 +537,16 @@ pub fn _run(comptime Make: *Z, comptime context:type, pp:anytype) !void {
     
 }
 
-// Once we have defined the Stage & Filters types, we need to create a pipeType using Mint.  The PipeType
-// is used to set the args for a pipe using struct(s) as context blocks.  Any required args are set, 
-// the run funcion should be called to execute the pipe.
-
-// Mint creates a tuple, arg_set, of stage arguement types, sets up some label mapping, and returns a PipeType.
-// init creates a PipeType using an allocator, then connects the stages using connectors and the label mapping. 
-// run uses arg_set to create a tuple of values for the pipe stages arguements, fills in the values, and runs the pipe
+// In filters and the Stage struct we sometimes need to find the PipeType and instance that created the stage.
+// Since PipeTypes and instances are created after Stages/Filters Type we have a small problem.  This comptime struct
+// front ends PipeType creations so we get extract them in Stages.  When a Stage is created we use @prtToInto to save
+// the instance pointer so we later can use getPT and an inline for to find the PipeType and @intToPtr to get the 
+// pipe's instance.
 
 pub const Z = struct {
 
     PT: []const type = &[_]type{},
-    //tup: anytype = .{}, // callpipe_tuples
-    //ctx: []const type = &[_]type{}, // callpipe context: struct type
-    //nth: comptime_int = 0,
-    
-    //pub fn Filters(comptime _:*Z, comptime StageType: type, comptime SelectedType: type) type {
-    //    return filters.Filters(StageType, SelectedType);
-    //}
-    
+
     pub fn Mint(comptime self:*Z, pp:anytype) type {
         // @compileLog("recursive");
         const Pipe = _Mint(self,pp,self.PT.len);
@@ -536,17 +566,17 @@ pub const Z = struct {
         return self.PT;
     }
     
-    //pub fn getTup(comptime self:*Z) @TypeOf(self.tup) {
-    //    return self.tup;
-    //}
-    //
-    //pub fn getCtx(comptime self:*Z) []const type {
-    //    return self.ctx;
-    //}
-    
 };
 
-fn _Mint(comptime Make:*Z,pp:anytype,pN:usize) type {
+// Once we have defined the Stage & Filters types, we need to create a pipeType using Mint.  The PipeType
+// is used to set the args for a pipe using struct(s) as context blocks.  Any required args are set, 
+// the run funcion should be called to execute the pipe.
+
+// Mint creates a tuple, arg_set, of stage arguement types, sets up some label mapping, and returns a PipeType.
+// init creates a PipeType using an allocator, then connects the stages using connectors and the label mapping. 
+// run uses arg_set to create a tuple of values for the pipe stages arguements, fills in the values, and runs the pipe
+
+fn _Mint(comptime Make:*Z, pp:anytype, pN:usize) type {
 
     _ = Make;
 
@@ -557,7 +587,7 @@ fn _Mint(comptime Make:*Z,pp:anytype,pN:usize) type {
         list: {
         comptime var l: []const type = &[_]type{};
         inline for (pp) |stg| {
-            if (@typeInfo(@TypeOf(stg[0])) == .EnumLiteral and stg.len > 1 and @typeInfo(@TypeOf(stg[1])) != .EnumLiteral) {
+            if (@typeInfo(@TypeOf(stg[0])) == .EnumLiteral and @tagName(stg[0])[0] != '_' and stg.len > 1 and  @typeInfo(@TypeOf(stg[1])) != .EnumLiteral) {
                 l = l ++ &[_]type{@TypeOf(stg[0])};
             }
         }
@@ -566,22 +596,24 @@ fn _Mint(comptime Make:*Z,pp:anytype,pN:usize) type {
     
     { // context block - we want to use k later in runtime
         comptime var k = 0; // save enum literals in the labels tuple
-        inline for (pp) |stg| {
-            if (@typeInfo(@TypeOf(stg[0])) == .EnumLiteral and stg.len > 1 and @typeInfo(@TypeOf(stg[1])) != .EnumLiteral) {
+        inline for (pp) |stg, i| {
+            if (@typeInfo(@TypeOf(stg[0])) == .EnumLiteral and @tagName(stg[0])[0] != '_' and stg.len > 1 and  @typeInfo(@TypeOf(stg[1])) != .EnumLiteral) {
                 labels[k] = stg[0];
                 k += 1;
             } // nodesLen may need adjustment with addpipe/callpipe
             inline for (stg) |elem, j| {
-                if (@typeInfo(@TypeOf(elem)) == .EnumLiteral and elem == ._) {
-                    if (j > 0)
-                        nodesLen -= 1
-                    else
-                        unreachable; // illegal ._ at start of stage Tuple
+                if (@typeInfo(@TypeOf(elem)) == .EnumLiteral) {
+                    switch  (elem) {                     
+                            ._  => { if (j > 0) nodesLen -= 1 else unreachable; },   // end must follow a label or filter 
+                            ._i => { if (j == 0 and i < pp.len-1) nodesLen -= 1 else unreachable; },  // bad in connector
+                            ._o => { if (j == 0 and i > 0) nodesLen -= 1 else unreachable; },  // bad out connector
+                        else => {}, // extend when .add method added
+                    }
                 }
             }
         } // map stage to label
         inline for (pp) |stg, i| {
-            if (@typeInfo(@TypeOf(stg[0])) == .EnumLiteral and stg[0] != ._) {
+            if (@typeInfo(@TypeOf(stg[0])) == .EnumLiteral and @tagName(stg[0])[0] != '_' ) { // ignore ._{x}
                 for (labels) |lbl, j| {
                     if (stg[0] == lbl)
                         lmap[i] = j; // save the mapping
@@ -589,13 +621,13 @@ fn _Mint(comptime Make:*Z,pp:anytype,pN:usize) type {
             }
         }
     }
-    
-    //inline for (pp) |_, i| {
+        
+    // inline for (pp) |_, i| {
     //    if (lmap[i]) |l| {
-    //        @compileLog(i);
-    //        @compileLog(labels[l]);
-    //    }
-    //}
+    //         @compileLog(i);
+    //         @compileLog(labels[l]);
+    //     }
+    // }
     
     comptime var ST:?type = null; // get the StageType from one of the Filter function calls
     comptime var arg_set: []const type = &[_]type{}; // build tuple of types for stage Fn and Args
@@ -623,20 +655,12 @@ fn _Mint(comptime Make:*Z,pp:anytype,pN:usize) type {
     
     std.debug.assert(ST != null);
     
-    //comptime var z = ZZ{};
-    //comptime var PT: []const type = &[_]type{}; // CallPipe type: Mint(callpipe_tuple)
-    
     return struct { // return an instance of ThisPipe
         const StageType = ST.?; // The StageType as extracted from a Filter function
         const Conn = StageType.Conn; // list of connections
         const ThisPipe = @This(); // this pipe's type
         const pipe = pp; // the pipe source tuple
         const pNum = pN;
-        //const ParentPipe = PP;
-    
-        //var pipes = [_]?*ThisPipe{null} ** 5;
-        // if (old == null)
-        //parent:?*ParentPipe = null,
         
         // stages/filter of the pipe
         p: [pipe.len]StageType = [_]StageType{undefined} ** pipe.len,
@@ -644,11 +668,140 @@ fn _Mint(comptime Make:*Z,pp:anytype,pN:usize) type {
         // connection nodes
         nodes: [nodesLen]Conn = [_]StageType.Conn{undefined} ** nodesLen,
         
+        // callpipe input and output connector numbers (255 when no connection)
+        inIdx:u8 = 255,
+        outIdx:u8 = 255,
+        
+        // commit level of pipe
+        commit: isize = -90909090,
+        severed: u32 = 0,
+        
         // the pipes last error (or void)
         rc: anyerror = error.ok,
         
+        // the pipes args for this run (see fn args)
         theArgs: std.meta.Tuple(arg_set) = undefined,
+         
+        pub fn init(allocator: *std.mem.Allocator) *ThisPipe {
         
+            var self: *ThisPipe = allocator.create(ThisPipe) catch unreachable;
+            
+            //self.parent = Parent;
+            
+            var p = self.p[0..]; // simipify life using slices
+            var nodes = self.nodes[0..];
+            self.outIdx = 255;
+            self.inIdx = 255;
+                        
+            //@compileLog(p.len);
+            inline for (pipe) |stg, i| {
+                p[i] = StageType{ .i=i, .allocator=allocator, .PTIdx = pNum, .pipeAddr = @ptrToInt(self) };
+                                
+                inline for (stg) |elem| { // parse the pipe
+                    switch (@typeInfo(@TypeOf(elem))) {
+                        .Fn, .BoundFn => { // fn....
+                            var name = @typeName(@TypeOf(elem));
+                            //std.debug.print("{s}\n",.{name});
+                            const end = std.mem.indexOfPos(u8, name, 0, ")).Fn.return_type").?;
+                            const start = std.mem.lastIndexOf(u8,name[0..end],".").? + 1;
+                            p[i].name = name[start..end];
+                            if (debugStart) std.debug.print("stg {} {s}\n", .{ i, p[i].name });
+                        },
+                        .EnumLiteral => { // label (.any) or end (._)
+                            switch (elem) { // position of EnumLiteral in stage tuple already verified in Mint comptime
+                                ._   => { p[i].end = true; },
+                                ._i  => { if (i==0 or (i>0 and p[i-1].end)) 
+                                              self.inIdx = if (self.inIdx==255) i+1 else unreachable // dup input connnector
+                                          else
+                                              unreachable; // illegal input connector
+                                        },
+                                ._o  => { if (!p[i-1].end) // i>0 known from Mint comptime
+                                              self.outIdx = if (self.outIdx==255) i-1 else unreachable // dup output connnector
+                                          else
+                                              unreachable; // illegal output connector
+                                        },
+                                else => {}, // not interested in labels here
+                            }
+                            //std.debug.print("Idx {} {} {}\n",.{self.outIdx,self.inIdx, nodesLen});
+                        },
+                        else => {},
+                    }
+                }
+            }
+
+            // var buffer: [@sizeOf(@TypeOf(nodes)) + 1000]u8 = undefined;
+            // const buffalloc = &std.heap.FixedBufferAllocator.init(&buffer).allocator;
+            // var map = std.hash_map.StringHashMap(Conn).init(buffalloc);
+            // defer map.deinit();
+            //@compileLog(nodes.len);
+            var map: [nodesLen]?Conn = .{null} ** nodesLen;
+
+            // create the pipe's nodes - all Conn{} fields are initialized by .set or in .run so
+            var j: u32 = 0;
+            for (p) |item, i| {
+                const stg = if (item.name) |_| true else false;
+
+                if (stg and !item.end and i != self.outIdx) { // add nodes when not end of stream and no out connection
+                    nodes[j].set(p, i, 0, i + 1, 0);
+                    j += 1;
+                }
+
+                if (lmap[i]) |lbl| {  // get the label index of this pp step
+                    if (map[lbl]) |*k| {
+                        if (!stg) {
+                            if (item.end) {
+                                if (i == 0 or !p[i-1].end) { // if previous item did not have an end of stream
+                                    if (p[i-1].name == null) {
+                                        var n = map[lmap[i-1].?].?;
+                                        nodes[j - 1].set(p, n.from, n.sout-1, k.to, k.sin);
+                                        k.set(p, k.from, k.sout, k.to, k.sin + 1);
+                                        n.set(p, n.from, n.sout + 1, n.to, n.sin);
+                                    } else {
+                                        nodes[j - 1].set(p, i - 1, 0, k.to, k.sin); 
+                                        k.set(p, k.from, k.sout, k.to, k.sin + 1);
+                                    }
+                                } else { // this is a null output stream
+                                    k.set(p, k.from, k.sout+1, k.to, k.sin);
+                                }
+                            } else {
+                                nodes[j].set(p, k.from, k.sout, i + 1, 0);
+                                j += 1;
+                                //if (i > 0 and p[i-1].name != null) {
+                                    k.set(p, k.from, k.sout + 1, k.to, k.sin);
+                                //}
+                            }
+                        } else {
+                            if (item.end) {
+                                nodes[j].set(p, k.from, k.sout, i, k.sin);
+                                j += 1;
+                                k.set(p, k.from, k.sout + 1, k.to, k.sin + 1);
+                            }
+                        }
+                    } else  {
+                        map[lbl] = Conn{};
+                        map[lbl].?.set(p, i, 1, i, 1);
+                    }
+                 }
+                if (debugStart) std.debug.print("{} {}\n", .{ i, j });
+            }
+                                                                    
+            // save the node slice in the stages;
+            for (p) |_, i| {
+                p[i].n = self.nodes[0..j];
+            }
+
+            // debug
+            if (debugStart) {
+                for (self.nodes[0..j]) |c, k| {
+                    std.debug.print("{} {}_{s} {} -> {}_{s} {}\n", .{ k, c.from, p[c.from].name, c.sout, c.to, p[c.to].name, c.sin });
+                }
+            }
+            //@compileLog("done");
+            //std.debug.print("{*}\n{*}\n",.{p,nodes});
+            return self;
+        }
+ 
+ 
         // associate the args with the stage's filters and a context struct.  Returns an arg_tuple
         
         fn args(self: *ThisPipe, context: anytype) std.meta.Tuple(arg_set) {
@@ -687,7 +840,7 @@ fn _Mint(comptime Make:*Z,pp:anytype,pN:usize) type {
 
                                         // this would be much simpiler if runtime vars worked in nested tuples...
 
-                                        if (@TypeOf(tuple[i][1][k+1]) == []const u8 and arg[0] == "\"") { // expect a string
+                                        if (@TypeOf(tuple[i][1][k+1]) == []const u8 and arg[0] == '\'') { // expect a string
                                             tuple[i][1][k+1] = arg[1..];
                                             continue;
                                         }
@@ -695,7 +848,7 @@ fn _Mint(comptime Make:*Z,pp:anytype,pN:usize) type {
                                             continue;
                                             
                                         comptime {
-                                            var t = @typeInfo(@TypeOf(tuple[i][1][k+1])); // base type or from args tuple
+                                            var t = @typeInfo(@TypeOf(tuple[i][1][k+1])); // base type from args tuple
                                             if (t == .Optional) { 
                                                 t = @typeInfo(t.Optional.child); // type of the optional
                                             }
@@ -760,172 +913,99 @@ fn _Mint(comptime Make:*Z,pp:anytype,pN:usize) type {
             return tuple;
         }
         
-        
-        pub fn init(allocator: *std.mem.Allocator) *ThisPipe {
-        
-            var self: *ThisPipe = allocator.create(ThisPipe) catch unreachable;
-            
-            //self.parent = Parent;
-            
-            var p = self.p[0..]; // simipify life using slices
-            var nodes = self.nodes[0..];
-                        
-            //@compileLog(p.len);
-            inline for (pipe) |stg, i| {
-                p[i] = StageType{ .i=i, .allocator=allocator, .PNIdx = pNum, .pipeAddr = @ptrToInt(self) };
-                                
-                inline for (stg) |elem, j| { // parse the pipe
-                    switch (@typeInfo(@TypeOf(elem))) {
-                        .Fn, .BoundFn => { // fn....
-                            var name = @typeName(@TypeOf(elem));
-                            //std.debug.print("{s}\n",.{name});
-                            const end = std.mem.indexOfPos(u8, name, 0, ")).Fn.return_type").?;
-                            const start = std.mem.lastIndexOf(u8,name[0..end],".").? + 1;
-                            p[i].name = name[start..end];
-                            if (debugStart) std.debug.print("stg {} {s}\n", .{ i, p[i].name });
-                        },
-                        .EnumLiteral => { // label (.any) or end (._)
-                            if (j > 0 and elem == ._) { // j == 0 case caught by constructor
-                                p[i].end = true;
-                                if (debugStart) std.debug.print("end {}\n", .{i});
-                            }
-                        },
-                        else => {},
-                    }
-                }
-            }
-
-            // var buffer: [@sizeOf(@TypeOf(nodes)) + 1000]u8 = undefined;
-            // const buffalloc = &std.heap.FixedBufferAllocator.init(&buffer).allocator;
-            // var map = std.hash_map.StringHashMap(Conn).init(buffalloc);
-            // defer map.deinit();
-            //@compileLog(nodes.len);
-            var map: [nodesLen]?Conn = .{null} ** nodesLen;
-
-            // create the pipe's nodes - all fields are initialized by .set or in .run so no Conn{} is needed
-            var j: u32 = 0;
-            for (p) |item, i| {
-                const stg = if (item.name) |_| true else false;
-
-                if (stg and !item.end ) { // add nodes for each stage that does not have an end of stream
-                    nodes[j].set(p, i, 0, i + 1, 0);
-                    j += 1;
-                }
-
-                if (lmap[i]) |lbl| {  // get the label index of this pp step
-                    if (map[lbl]) |*k| {
-                        if (!stg) {
-                            if (item.end) {
-                                if (i == 0 or !p[i-1].end) { // if previous item did not have an end
-                                    nodes[j - 1].set(p, i - 1, 0, k.to, k.sin); 
-                                    k.set(p, k.from, k.sout, k.to, k.sin + 1);
-                                } else { // this is a null output stream
-                                    k.set(p, k.from, k.sout+1, k.to, k.sin);
-                                }
-                            } else {
-                                nodes[j].set(p, k.from, k.sout, i + 1, 0);
-                                j += 1;
-                                k.set(p, k.from, k.sout + 1, k.to, k.sin);
-                            }
-                        } else {
-                            if (item.end) {
-                                nodes[j].set(p, k.from, k.sout, i, k.sin);
-                                j += 1;
-                                k.set(p, k.from, k.sout + 1, k.to, k.sin + 1);
-                            }
-                        }
-                    } else if (stg) {
-                        map[lbl] = Conn{};
-                        map[lbl].?.set(p, i, 1, i, 1);
-                    }
-                 }
-                if (debugStart) std.debug.print("{} {}\n", .{ i, j });
-            }
-                                                                    
-            // save the node slice in the stages;
-            for (p) |_, i| {
-                p[i].n = self.nodes[0..j];
-            }
-
-            // debug
-            if (debugStart) {
-                for (self.nodes[0..j]) |c, k| {
-                    std.debug.print("{} {s}({}),{} -> {s}({}),{}\n", .{ k, p[c.from].name, c.from, c.sout, p[c.to].name, c.to, c.sin });
-                }
-            }
-            //@compileLog("done");
-            //std.debug.print("{*}\n{*}\n",.{p,nodes});
-            return self;
-        }
 
         // run the pipe, you can repeat runs with different arg_tuple(s) without redoing setup.
 
         pub fn run(self: *ThisPipe, context: anytype) !void {
-            const tuple = self.args(context);
-            //var arena3 = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-            //defer arena3.deinit();
-            
-            var p = self.p[0..]; // use slices
-            var nodes = self.p[0].n;
-            self.rc = error.ok;
-            
-            const allocator = p[0].allocator; // use the same allocator used to allocate ThisPipe
-            
-            // set starting input/output streams to lowest connected streams (usually 0 - but NOT always)
-            for (nodes) |*n| {
-            
-                if (n.src.outC) |c| {
-                    if (n.sout < c.sout) n.src.outC = n;
-                } else
-                    n.src.outC = n;
                     
-                if (n.dst.inC) |c| {
-                    if (n.sin < c.sin) n.dst.inC = n;
-                } else
-                    n.dst.inC = n;
+            const what:enum{prep,call,all} = .all;
+                    
+            var p = self.p[0..];        // use slices for easier to read code
+            var nodes = self.p[0].n;
+            const allocator = p[0].allocator; // use the same allocator used to allocate ThisPipe
+
+            if (what == .prep or what == .all) {
+            
+                self.theArgs = self.args(context);
+                //var arena3 = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+                //defer arena3.deinit();
+                            
+                self.severed = 0;
+                self.rc = error.ok;
                 
-                n.in = .ok;
-            }
-
-            // set stages to starting State
-            for (p) |*s, i| {
-                if (s.name) |_| {
-                    s.commit = -@intCast(isize, (i + 1));
-                    s.state = .start;
-                    //s.rc = error.active;
-                    s.err = error.ok;
+                
+                
+                // set starting input/output streams to lowest connected streams (usually 0 - but NOT always)
+                for (nodes) |*n| {
+                
+                    if (n.src.outC) |c| {
+                        if (n.sout < c.sout) n.src.outC = n;
+                    } else
+                        n.src.outC = n;
+                        
+                    if (n.dst.inC) |c| {
+                        if (n.sin < c.sin) n.dst.inC = n;
+                    } else
+                        n.dst.inC = n;
+                    
+                    n.in = .ok;
                 }
-            }
 
-            // main dispatch loop
-
-            var commit: isize = -9999;
-            var state: u32 = 9;
-            var loop: u32 = 0;
-            var severed: u32 = 0;
-
-            running: while (severed < nodes.len) {
-                var temp: isize = 9999;
-
-                if (loop < 10) for (nodes) |*c| {
-
-                    // dispatch a pending output
-                    if (c == c.src.outC and c.src.state == .output and c.in != .data and c.src.commit == commit) {
-                        if (debugLoop) {
-                            if (state == 1)
-                                loop += 1
-                            else {
-                                state = 1;
-                                loop = 0;
-                            }
-                        }
-                        if (debugDisp) std.log.info("pre o src.state {} {}_{s} sout {} in {} {}\n\n", .{ c.src.state, c.src.i, c.src.name, c.sout, c.in, c.data });
-                        resume c.src.frame;
-                        continue :running;
+                // set stages to starting State
+                for (p) |*s| {
+                    if (s.name) |_| {
+                        //s.commit = -@intCast(isize, (i + 100));
+                        s.commit = -1;
+                        s.state = .start;
+                        //s.rc = error.active;
+                        s.err = error.ok;
                     }
+                }
 
+                // main dispatch loop
+
+                self.commit = -1;
+                self.severed = 0;
+            }
+            
+            var state: u32 = 9;
+            var loop: u32 = 0;       
+            
+            const cList = std.ArrayList(*Conn);
+
+            var fwdList = cList.init(allocator);
+            defer fwdList.deinit();
+            var bwdList = cList.init(allocator);
+            defer bwdList.deinit();
+            
+            var list:*cList = &fwdList;
+            var runState:usize = 0;
+            
+            running: while (self.severed < nodes.len) {
+                var temp: isize = 90909090;    
+                
+                runState = 0;
+                
+                if (fwdList.items.len > 0) {
+                    list = &fwdList;
+                    //std.debug.print(">",.{});
+                } else {
+                    runState = 1;
+                    if (bwdList.items.len > 0) {
+                        list = &bwdList;
+                        //std.debug.print("<",.{});
+                    } else
+                        runState = 2;
+                }
+
+                //std.debug.print("({})",.{fwdList.items.len});
+                if (runState<2) while (list.items.len>0) {
+                    
+                    const c = list.swapRemove(list.items.len-1);                    
+                
                     // dispatch a pending peekTo or readTo
-                    if (c == c.dst.inC and (c.dst.state == .peekTo or c.dst.state == .readTo) and c.in != .ok and c.dst.commit == commit) {
+                    if (c == c.dst.inC and (c.dst.state == .peekTo or c.dst.state == .readTo) and c.in != .ok and c.dst.commit == self.commit) {
+                        // std.debug.print("p",.{});
                         if (debugLoop) {
                             if (state == 2)
                                 loop += 1
@@ -935,12 +1015,22 @@ fn _Mint(comptime Make:*Z,pp:anytype,pN:usize) type {
                             }
                         }
                         if (debugDisp) std.log.info("pre p dst.state {} {}_{s} sin {} in {} {}\n\n", .{ c.dst.state, c.dst.i, c.dst.name, c.sin, c.in, c.data });
+                        //_ = list.swapRemove(i);
                         resume c.dst.frame;
+                        if (c.dst.fwdC) |n| {
+                            try fwdList.append(n);
+                            c.dst.fwdC = null;
+                        }
+                        if (c.dst.bwdC) |n| {
+                            try bwdList.append(n);
+                            c.dst.bwdC = null;
+                        }
                         continue :running;
                     }
 
                     // dispatch a pending anyinput
-                    if (c.dst.state == .anyinput and c.in != .ok and c.in != .sever and c.dst.commit == commit) {
+                    if (c.dst.state == .anyinput and c.in != .ok and c.in != .sever and c.dst.commit == self.commit) {
+                        //std.debug.print("a",.{});
                         if (debugLoop) {
                             if (state == 3)
                                 loop += 1
@@ -951,111 +1041,309 @@ fn _Mint(comptime Make:*Z,pp:anytype,pN:usize) type {
                         }
                         c.dst.inC = c;
                         if (debugDisp) std.log.info("pre a dst.state {} {}_{s} sin {} \n\n", .{ c.dst.state, c.dst.i, c.dst.name, c.sin });
+                        //_ = list.swapRemove(i);
                         resume c.dst.frame;
+                        if (c.dst.fwdC) |n| {
+                            try fwdList.append(n);
+                            c.dst.fwdC = null;
+                        } 
+                        if (c.dst.bwdC) |n| {
+                            try bwdList.append(n);
+                            c.dst.bwdC = null;
+                        }
                         continue :running;
                     }
                    
-                    // compete a sever after any data in the node is consumed
-                    if ((c.src.outC == null and c.in == .ok) or (c.dst.inC == null and c.in == .ok)) {
-                        if (debugDisp) std.log.info("pre sever {} {}_{s} sin {} \n\n", .{ c.dst.state, c.dst.i, c.dst.name, c.sin });
-                        c.in = .sever;
-                        severed += 1;
+                    // dispatch a pending output
+                    if (c == c.src.outC and c.src.state == .output and c.in != .data and c.src.commit == self.commit) {
+                        //std.debug.print("o",.{});
+                        if (debugLoop) {
+                            if (state == 1)
+                                loop += 1
+                            else {
+                                state = 1;
+                                loop = 0;
+                            }
+                        }
+                        if (debugDisp) std.log.info("pre o src.state {} {}_{s} sout {} in {} {}\n\n", .{ c.src.state, c.src.i, c.src.name, c.sout, c.in, c.data });
+                        //_ = list.swapRemove(i);
+                        resume c.src.frame;
+                        if (c.src.fwdC) |n| {
+                            try fwdList.append(n);
+                            c.src.fwdC = null;                            
+                        } 
+                        if (c.src.bwdC) |n| {
+                            try bwdList.append(n);
+                            c.src.bwdC = null;
+                        }
                         continue :running;
+                    } 
+                    
+                    // compete a sever after any data in the node is consumed
+                    //if ((c.src.state == .sever and c.src.outC == null and c.in == .ok) or 
+                    //    (c.dst.state == .sever and c.dst.inC == null and c.in == .ok)
+                    if ((c.src.state == .sever and c.in == .ok) or 
+                        (c.dst.state == .sever and c.in == .ok)
+                       ) {
+                        // std.debug.print("v",.{});
+                        if (debugDisp) std.log.info("pre sever {} {}_{s} sin {} \n\n", .{ c.dst.state, c.dst.i, c.dst.name, c.sin });
+                        if (c.in != .sever)
+                            try fwdList.append(c);
+                        c.in = .sever;
+                        self.severed += 1;
+                        continue :running;
+                    
                     }
                     
-                    //std.debug.print(".call dst {} {}\n      src {} {} - {} {}\n",.{c.dst.state, c.dst.commit, c.src.state, c.src.commit, commit, c.in});
-                    if ((c.dst.state == .call or c.src.state == .call) and c.in != .sever ) {
-                        const stage = if (c.dst.state == .call) c.dst else c.src;                        
-                        if (stage.commit == commit) {
-                            //const cpTuples = Make.tup;
-                            //std.debug.print(".call {} {} {}",.{stage.cpIdx, Make.nth, Make.getTup()});
-                            //inline for (Make.getTup()) |tup, i| {   
-                            //    if (stage.cpIdx == i) {
-                                    //_ = tup;
-                                    //std.debug.print(".call {}\n",.{tup});
-                                    //const CallPipe = Make.Call(tup);
-                                    //_ = CallPipe;
-                                    //var callpipe = CallPipe.init(stage.allocator);
-                                    //_ = callpipe;
-                                    ////stage.pipeAddr = @ptrToInt(callpipe);
-                                    //const ctx = Make.getCtx()[i];
-                                    //callpipe.theArgs = callpipe.args(ctx);
-                                    //std.debug.print("put {*}\n {}\n {}\n",.{callpipe,Make.getPT()[0],CallPipe.pipe});
-                              //  }
-                            // }
+                    // special server logic for selectAnyInput
+                    if (c.dst.state == .anyinput and c.src.state == .sever) {
+                        if (c.dst.countInstreams() == 0) {
+                            //std.debug.print("r",.{});
+                            c.in = .sever;
                             resume c.dst.frame;
+                            self.severed += 1;
+                            if (c.dst.fwdC) |n| {
+                                try fwdList.append(n);
+                                c.dst.fwdC = null;
+                            } 
+                            if (c.dst.bwdC) |n| {
+                                try fwdList.append(n);  // yes fwd list here
+                                c.dst.bwdC = null;
+                            }
+                            continue :running;
+                        }
+                    }                                                            
+                };
+                
+                // if (runState < 2)
+                //     std.debug.print("~",.{});
+            
+                runState += 1;
+                                    
+                if (runState < 2 or fwdList.items.len>0)
+                    continue :running;
+
+                // std.debug.print(":",.{});
+                
+                var i = nodes.len;
+                if (loop<10) while (i>0) { // (nodes) |*c| {
+                    i -= 1;
+                    var c = &nodes[i];
+                    
+                //if (loop<10) for (nodes) |*c| {
+                    
+                    // std.debug.print(":",.{});
+                
+                    // dispatch a pending peekTo or readTo
+                    if (c == c.dst.inC and (c.dst.state == .peekTo or c.dst.state == .readTo) and c.in != .ok and c.dst.commit == self.commit) {
+                        //std.debug.print("{c}",.{@tagName(c.dst.state)[0]});
+                        if (debugLoop) {
+                            if (state == 2)
+                                loop += 1
+                            else {
+                                state = 2;
+                                loop = 0;
+                            }
+                        }
+                        if (debugDisp) std.log.info("pre p dst.state {} {}_{s} sin {} in {} {}\n\n", .{ c.dst.state, c.dst.i, c.dst.name, c.sin, c.in, c.data });
+                        resume c.dst.frame;
+                        if (c.dst.fwdC) |n| {
+                            try fwdList.append(n);
+                            c.dst.fwdC = null;
+                        }
+                        if (c.dst.bwdC) |n| {
+                            try bwdList.append(n);
+                            c.dst.bwdC = null;
+                        }
+                        continue :running;
+                    }
+
+                 //   // dispatch a pending anyinput
+                 //   if (c.dst.state == .anyinput and c.in != .ok and c.in != .sever and c.dst.commit == self.commit) {
+                 //   //if (c.dst.state == .anyinput and c.in != .ok and c.dst.commit == self.commit) {
+                 //       std.debug.print("a",.{});
+                 //       if (debugLoop) {
+                 //           if (state == 3)
+                 //               loop += 1
+                 //           else {
+                 //               state = 3;
+                 //               loop = 0;
+                 //           }
+                 //       }
+                 //       c.dst.inC = c;
+                 //       if (debugDisp) std.log.info("pre a dst.state {} {}_{s} sin {} \n\n", .{ c.dst.state, c.dst.i, c.dst.name, c.sin });
+                 //       resume c.dst.frame;
+                 //       if (c.dst.fwdC) |n| {
+                 //           try fwdList.append(n);
+                 //           c.dst.fwdC = null;
+                 //       }
+                 //       if (c.dst.bwdC) |n| {
+                 //           try bwdList.append(n);
+                 //           c.dst.bwdC = null;
+                 //       }
+                 //       continue :running;
+                 //   }
+                 //  
+                 //   // dispatch a pending output
+                 //   if (c == c.src.outC and c.src.state == .output and c.in != .data and c.src.commit == self.commit) {
+                 //       std.debug.print("o",.{});
+                 //       if (debugLoop) {
+                 //           if (state == 1)
+                 //               loop += 1
+                 //           else {
+                 //               state = 1;
+                 //               loop = 0;
+                 //           }
+                 //       }
+                 //       if (debugDisp) std.log.info("pre o src.state {} {}_{s} sout {} in {} {}\n\n", .{ c.src.state, c.src.i, c.src.name, c.sout, c.in, c.data });
+                 //       resume c.src.frame;
+                 //       if (c.src.fwdC) |n| {
+                 //           try fwdList.append(n);
+                 //           c.src.fwdC = null;
+                 //       }
+                 //       if (c.src.bwdC) |n| {
+                 //           try bwdList.append(n);
+                 //           c.src.bwdC = null;
+                 //       }
+                 //       continue :running;
+                 //   } 
+                   
+                    // compete a sever after any data in the node is consumed
+                    if ((c.src.state == .sever and c.in == .ok) or 
+                        (c.dst.state == .sever and c.in == .ok)
+                       ) {
+                        //std.debug.print("v",.{});
+                        if (debugDisp) std.log.info("pre sever {} {}_{s} sin {} \n\n", .{ c.dst.state, c.dst.i, c.dst.name, c.sin });
+                        c.in = .sever;
+                        self.severed += 1;
+                        continue :running;
+                
+                    }
+                    
+                    // special server logic for selectAnyInput
+                    if (c.dst.state == .anyinput and c.src.state == .sever) {
+                        if (c.dst.countInstreams() == 0) {
+                            //std.debug.print("r",.{});
+                            c.in = .sever;
+                            resume c.dst.frame;
+                            self.severed += 1;
+                            if (c.dst.fwdC) |n| {
+                                try fwdList.append(n);
+                                c.dst.fwdC = null;
+                            }
+                            if (c.dst.bwdC) |n| {
+                                try bwdList.append(n);
+                                c.dst.bwdC = null;
+                            }
+                            continue :running;
+                        }
+                    }
+                    
+                    //std.debug.print(".call dst {} {}\n      src {} {} - {} {}\n",.{c.dst.state, c.dst.commit, c.src.state, c.src.commit, self.commit, c.in});
+                    if ((c.dst.state == .call or c.src.state == .call) and c.in != .sever ) {
+                        const stage = if (c.dst.state == .call) c.dst else c.src;         
+                        if (stage.commit == self.commit) {
+                            resume stage.frame;
+                            if (stage.fwdC) |n| {
+                                try fwdList.append(n);
+                                stage.fwdC = null;
+                            } 
+                            if (c.dst.fwdC) |n| {
+                                try fwdList.append(n);
+                            c.dst.fwdC = null;
+                            }
                             continue :running;
                         }
                     }
 
                     // start a stage fliter from connection destination
-                    if (c.dst.state == .start and c.dst.commit == commit) {
+                    if (c.dst.state == .start and c.dst.commit == self.commit) {
                         c.dst.state = .run;
                         c.dst.commit = 0;
                         comptime var j = 0;
                         inline while (j < p.len) : (j += 1) {
-                            if (@TypeOf(tuple[j][0]) != void) { // prevent inline from generating void calls
+                            if (@TypeOf(self.theArgs[j][0]) != void) { // prevent inline from generating void calls
                                 if (c.dst.i == j) {
                                     const f = pipe[j][if (@typeInfo(@TypeOf(pipe[j][0])) == .EnumLiteral) 1 else 0];
+                                    // @frameSize can be buggy...
                                     _ = @asyncCall(allocator.alignedAlloc(u8, 16, @sizeOf(@Frame(f))) catch
-                                        unreachable, {}, f, tuple[j][1]);
+                                        unreachable, {}, f, self.theArgs[j][1]);
                                 }
                             }
+                        }
+                        if (c.dst.fwdC) |n| {
+                            try fwdList.append(n);
+                            c.dst.fwdC = null;
+                        }
+                        if (c.dst.bwdC) |n| {
+                            try bwdList.append(n);
+                            c.dst.bwdC = null;
                         }
                         continue :running;
                     }
 
                     // start a stage filter from connection source
-                    if (c.src.state == .start and c.src.commit == commit) {
+                    if (c.src.state == .start and c.src.commit == self.commit) {
                         c.src.state = .run;
                         c.src.commit = 0;
                         comptime var j = 0;
                         inline while (j < p.len) : (j += 1) {
-                            if (@TypeOf(tuple[j][0]) != void) { // prevent inline from generating void calls
+                            if (@TypeOf(self.theArgs[j][0]) != void) { // prevent inline from generating void calls
                                 if (c.src.i == j) {
                                     const f = pipe[j][if (@typeInfo(@TypeOf(pipe[j][0])) == .EnumLiteral) 1 else 0];
-                                    //const r = ReturnOf(f);
+                                    // @frameSize can be buggy...
                                     _ = @asyncCall(allocator.alignedAlloc(u8, 16, @sizeOf(@Frame(f))) catch
-                                        unreachable, {}, f, tuple[j][1]);
+                                        unreachable, {}, f, self.theArgs[j][1]);
                                 }
                             }
                         }
+                        if (c.src.fwdC) |n| {
+                            try fwdList.append(n);
+                            c.src.fwdC = null;
+                        }
+                        if (c.src.bwdC) |n| {
+                            try bwdList.append(n);
+                            c.src.bwdC = null;
+                        }                   
                         continue :running;
                     }
-
+                    
                     // track commit levels
                     if (c.dst.commit < temp) temp = c.dst.commit;
                     if (c.src.commit < temp) temp = c.src.commit;
                 };
 
                 // is it time to commit to a higher level?
-                if (debugDisp) std.debug.print("commit {} {}\n", .{ commit, temp });
-                if (temp > commit) {
-                    commit = temp;
+                if (debugDisp) std.debug.print("commit {} {}\n", .{ self.commit, temp });
+                if (temp > self.commit) {
+                    self.commit = temp;
+                    if (what == .prep and self.commit >= 0)
+                        return;
                     continue :running;
                 }
-
+                
                 // when/if we use os threads in stages we will need to wait for them here.
 
                 if (debugLoop) if (loop >= 10) {
-                    std.debug.print("\nlooped {}\n", .{state});
+                    std.debug.print("looping\n", .{});
                     for (nodes) |*c| {
-                        std.debug.print("start {*} src {}_{s} {} {*} {} {} dst {}_{s} {} {*} {} {} in {} {}\n", .{ c, c.src.i, c.src.name, c.sout, c.src.outC, c.src.state, c.src.commit, c.dst.i, c.dst.name, c.sin, c.dst.inC, c.dst.state, c.dst.commit, c.in, c.data });
+                        std.debug.print("src {}_{s} {} {} {} {} dst {}_{s} {} {} {} {} in {} {}\n", .{ c.src.i, c.src.name, c.sout, c.src.state, c.src.err,  c.src.commit, c.dst.i, c.dst.name, c.sin, c.dst.state, c.dst.err, c.dst.commit, c.in,  c.data.type });
                     }
                     break :running;
                 };
-
-                // check completion and detect stalls
+                
+                // detect stalls
                 for (p) |*s| {
                     if (debugDisp) std.log.info("{s} {}", .{ s.name, s.rc });
                     if (s.err != error.ok) {
                         if (s.err == error.endOfStream or s.commit == -90909090) {
                             continue;
-                        } else if (severed < nodes.len) {
+                        } else if (self.severed < nodes.len) {
                             std.debug.print("\nStalled! {s} rc {}\n", .{ s.name, s.err });
                             for (nodes) |*c| {
                                 std.debug.print("src {}_{s} {} {} {} dst {}_{s} {} {} {} in {} {}\n", .{ c.src.i, c.src.name, c.sout, c.src.state, c.src.commit, c.dst.i, c.dst.name, c.sin, c.dst.state, c.dst.commit, c.in,  c.data.type });
                             }
+                            self.commit = 90909090;
                             self.rc = error.pipeStall;
                             return self.rc;
                         }
@@ -1071,6 +1359,7 @@ fn _Mint(comptime Make:*Z,pp:anytype,pN:usize) type {
                 }
             }
 
+            self.commit = 90909090;
             return;
         }
     };

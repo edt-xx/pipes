@@ -16,6 +16,7 @@ pub fn build(b: *std.build.Builder) void {
     const exe_opt = b.addOptions();
     exe.addOptions("build_options", exe_opt);
 
+    // To be updated - options will not work as expected
     exe_opt.addOption(bool, "debugCmd", false);
     exe_opt.addOption(bool, "debugDisp", false);
     exe_opt.addOption(bool, "debugLoop", false);
@@ -32,7 +33,7 @@ pub fn build(b: *std.build.Builder) void {
         .name = "filters",
         .path = .{ .path = "./filters.zig" },
         .dependencies = &.{exe_opt.getPackage("build_options")},
-        // .dependencies = &.{exe_opt.getPackage("build_options"), pipes_pkg},
+        //.dependencies = &.{exe_opt.getPackage("build_options"), pipes_pkg},
     };
     
     exe.addPackage(pipes_pkg);
@@ -44,7 +45,7 @@ pub fn build(b: *std.build.Builder) void {
     //    .os_tag = .linux,
     //    .abi = .gnu,
     //    .cpu_model = .baseline,                       // .baseline encompasses more old cpus
-    //});
+    //}); 
     exe.setBuildMode(mode);
     //exe.pie = true;
     //exe.setBuildMode(std.builtin.Mode.ReleaseFast);     // to hard code ReleaseFast/ReleaseSafe etc

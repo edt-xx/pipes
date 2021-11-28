@@ -6,6 +6,7 @@ const debugLoop = build_options.debugLoop;
 const debugStages = build_options.debugStages;
 const debugCmd = build_options.debugCmd;
 const debugStart = build_options.debugStart;
+//const debugStart = true;
 
 // using std.meta.argsTuple implies that no filter can use generic functions.  We use Filter to generate filter functions
 // that are not generic.  We do not have the functions in StageType since we generate the args for the functions via
@@ -28,19 +29,20 @@ pub fn Filters(comptime StageType: type, comptime SelectedType: type) type {
                 self.endStage();
             
             if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
+            //try commit(0);
             while (true) {
                 if (debugStages) std.log.info("div pre peek {}_{s} {*}", .{ self.i, self.name, self.outC });
                 var i = try self.peekTo(T);
                 //if (debugStages) std.log.info("div post peek {}_{s} {}",.{self.i, self.name, i});
                 if (i % d == 0) {
                     try self.selectOutput(0);
+                    try self.output(i);
                 } else {
-                    self.selectOutput(1) catch |err| 
-                        if (err != error.noOutStream) return err;  
+                    self.selectOutput(1) catch {};
+                    if (self.outC != null)          // if an output stream is selected
+                        try self.output(i);  
                 }
                 if (debugStages) std.log.info("div out {}_{s} {*}", .{ self.i, self.name, self.outC });
-                _ = self.output(i) catch |err| 
-                    if (err != error.noOutStream) return err;                
                 _ = try self.readTo(T);
             }
         }
@@ -50,23 +52,25 @@ pub fn Filters(comptime StageType: type, comptime SelectedType: type) type {
             defer 
                 self.endStage();
                 
-            const y = struct {
-                pub var a:u64 = 30;
-            };
-                
-            try self.call(y,.{ 
-                .{ gen, .{"a"} }, 
-                .{ console, ._ } 
-            });
+           //const y = struct {
+           //    pub var a:u64 = 16;
+           //};
+           //    
+           //try self.call(y,.{ 
+           //    .{ ._i },
+           //    .{ gen, .{"a"} }, 
+           //    .{ exactdiv, .{3} },
+           //    .{ console},
+           //    .{ ._o, ._ },
+           //});
                 
             if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
                        
             while (true) {
-                const tu = try self.peekTo(S.TU);
-                self.selectOutput(@enumToInt(tu.type)) catch |err|
-                     if (err != error.noOutStream) return err;
+                const tu = try self.peekTo(S.TU);            
+                self.selectOutput(@enumToInt(tu.type)) catch {};
                 if (self.outC != null) { // if an output stream is selected
-                    _ = try self.output(tu);
+                    try self.output(tu);
                 }
                 _ = try self.readTo(S.TU);
             }        
@@ -94,15 +98,13 @@ pub fn Filters(comptime StageType: type, comptime SelectedType: type) type {
                 if (std.mem.indexOfPos(u8, i, 0, d)) {
                     try self.selectOutput(0);
                 } else {
-                    self.selectOutput(1) catch |err| 
-                        if (err != error.noOutStream) return err;   
+                    self.selectOutput(1) catch {}; 
                 }
-                _ = self.output(i) catch |err| 
-                    if (err != error.noOutStream) return err;
-                
+                if (self.outC != null) 
+                    try self.output(i);
+                    
                 _ = try self.readTo(S.TU);
-            }
-        
+            }        
         }
         
         pub fn typeUnion(self: *S, slc: *[]S.TU) callconv(.Async) !void {
@@ -114,11 +116,11 @@ pub fn Filters(comptime StageType: type, comptime SelectedType: type) type {
             for (slc.*) |d| {
                 _ = try self.output(d);
             }
-            while (true) {  // copy rest stream to output
-                const tu = self.peekTo(S.TU) catch break;
-                self.output(tu) catch break;
-                _ = self.readTo(S.TU) catch break;
-            }
+            //while (true) {  // copy rest stream to output
+            //    const tu = self.peekTo(S.TU) catch break;
+            //    self.output(tu) catch break;
+            //    _ = self.readTo(S.TU) catch break;
+            //}
             return self.ok();
         }
         
@@ -139,10 +141,12 @@ pub fn Filters(comptime StageType: type, comptime SelectedType: type) type {
             if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
             
             if (slc == null) {
+                //const xxx = try self.peekTo(S.TU);
+                //std.debug.print("slice {any}\n",.{xxx.type});
                 while (true) {
                     const d = try self.peekTo([]T);
                     for (d) |i| {
-                        _ = try self.output(i);
+                        try self.output(i);
                     }
                     _ = try self.readTo([]T);
                 }                
@@ -173,7 +177,7 @@ pub fn Filters(comptime StageType: type, comptime SelectedType: type) type {
                 if (val: { self.selectInput(0) catch break :val true; break :val false; }) { // output items of arrayList arg
                     std.debug.assert(e == .read);
                     for (al.?.items) |i| {
-                        _ = try self.output(i);
+                        try self.output(i);
                     }
                     
                 } else { // read elements from pipe and append to passed arrayList
@@ -195,7 +199,7 @@ pub fn Filters(comptime StageType: type, comptime SelectedType: type) type {
                     if (val: { self.selectOutput(0) catch break :val false; break :val true; }) {
                         var an = std.ArrayList(T).init(al.?.allocator); // use the original arraylist's allocator
                         try an.appendSlice(al.?.items);   
-                        _ = try self.output(an);
+                        try self.output(an);
                     } else
                         self.err = error.ok;
                 
@@ -223,14 +227,15 @@ pub fn Filters(comptime StageType: type, comptime SelectedType: type) type {
             if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
             
             if (val: { self.selectInput(0) catch { break :val true; }; break :val false; }) { 
-                 _ = try self.output(v.*);
+                 try self.output(v.*);
             } else {
-                v.* = try self.peekTo(T);                
-                while (true) {
-                    const d = self.peekTo(T) catch break;
-                    self.output(d) catch break;
-                    _ = self.readTo(T) catch break;
-                }
+                v.* = try self.peekTo(T);  
+                _ = try self.readTo(S.TU);
+            }
+            while (true) {
+                const d = self.peekTo(S.TU) catch break;
+                self.output(d) catch break;
+                _ = self.readTo(S.TU) catch break;
             }
             return self.ok();
         }
@@ -246,22 +251,32 @@ pub fn Filters(comptime StageType: type, comptime SelectedType: type) type {
                 if (try self.typeIs(T)) {
                     const e = try self.peekTo(T);
                     try stdout.print("{any} ", .{e});
-                    _ = self.output(e) catch { self.err = error.ok; };
+                    self.output(e) catch { self.err = error.ok; };
                     _ = try self.readTo(T);
                 } else if (try self.typeIs(*[]T)) {
                     const e = try self.peekTo(*[]T);
                     try stdout.print("{any} ", .{e});
-                    _ = self.output(e) catch { self.err = error.ok; };
+                    self.output(e) catch { self.err = error.ok; };
                     _ = try self.readTo(*[]T);
                 } else if (try self.typeIs(std.ArrayList(T))) {
                     const e = try self.peekTo(std.ArrayList(T));
                     try stdout.print("{any} ", .{e});
-                    _ = self.output(e) catch { self.err = error.ok; };
+                    self.output(e) catch { self.err = error.ok; };
                     _ = try self.readTo(std.ArrayList(T));
+                } else if (try self.typeIs([]const u8)) {
+                    const e = try self.peekTo([]const u8);
+                    try stdout.print("{s} ", .{e});
+                    self.output(e) catch { self.err = error.ok; };
+                    _ = try self.readTo([]const u8);
+                } else if (try self.typeIs([:0]const u8)) {
+                    const e = try self.peekTo([:0]const u8);
+                    try stdout.print("{s} ", .{e});
+                    self.output(e) catch { self.err = error.ok; };
+                    _ = try self.readTo([:0]const u8);
                 } else {
                     const e = try self.peekTo(S.TU);
                     try stdout.print("{any} ", .{e});
-                    _ = self.output(e) catch { self.err = error.ok; };
+                    self.output(e) catch { self.err = error.ok; };
                     _ = try self.readTo(std.ArrayList(T));
                 }
                 
@@ -305,7 +320,7 @@ pub fn Filters(comptime StageType: type, comptime SelectedType: type) type {
 
             while (true) {
                 _ = self.selectAnyInput() catch |e| {
-                    if (e == error.endOfStream) continue else return e;
+                    if (e == error.noInStream) return else return e;
                 };
                 if (debugStages) std.log.info("faninany {}_{s} {*} {*}", .{ self.i, self.name, self.inC, self.outC });
                 const tmp = try self.peekTo(S.TU);
@@ -316,13 +331,14 @@ pub fn Filters(comptime StageType: type, comptime SelectedType: type) type {
 
         pub fn copy(self: *S) callconv(.Async) !void {
             defer
-                self.endstage();
+                self.endStage();
             
             if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
 
             while (true) {
-                const tmp = self.readTo(S.TU) catch break;
+                const tmp = self.peekTo(S.TU) catch break;
                 self.output(tmp) catch break;
+                _ = self.readTo(S.TU) catch break;
             }
             return self.ok();
         }
@@ -342,5 +358,19 @@ pub fn Filters(comptime StageType: type, comptime SelectedType: type) type {
             }
         }
         
+        pub fn replace(self: *S, with: T) callconv(.Async) !void {
+            defer
+                self.endStage();
+                
+            if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
+            
+            while (true) {
+                _ = self.peekTo(S.TU) catch break;
+                self.output(with) catch break;
+                _ = self.readTo(S.TU) catch break;
+            }
+            return self.ok();
+        }        
+            
     };
 }

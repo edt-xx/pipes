@@ -33,7 +33,7 @@ const context = struct {
 };
 
 const S = pipe.Stage(.{u64, i64});
-const f = sys.Filters(uP,u64);
+const f = sys.Filters(S,u64);
 
 const aPipe = .{ 
         .{ f.gen, .{"aaa"} },           // generate a steam of numbers and pass each to the next stage
