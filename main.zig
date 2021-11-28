@@ -133,7 +133,7 @@ pub fn main() !void {
     try sPipew.run(x);
     std.debug.print("\n", .{});
     
-        const pSlicer = .{
+    const pSlicer = .{
         .{ F.slice, .{"sss"} }, // extract elements of slice sss and pass to console
         .{ F.console, ._ },
     };

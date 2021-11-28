@@ -20,6 +20,7 @@ const State = enum(u4) {
     run,
     done,
     sever,
+    eos,
     anyinput,
     commit,
     dummy,
@@ -40,6 +41,7 @@ const Message = enum(u2) {
     ok,
     data,
     sever,
+    severed,
 };
 
 pub fn ReturnOf(comptime func: anytype) type {
@@ -227,12 +229,12 @@ pub fn _Stage(comptime Make:*Z, list: anytype) type {
         bwdC: ?*Conn = null,
         state: State = undefined,
         commit: isize = -90909090,
+        i: usize = undefined,
         frame: anyframe = undefined,
         err: stageError = error.ok,
         n: []Conn = undefined,          // connections used by this stage (might be removable)
         name: ?[]const u8 = null,       // name of the stage, may dissapear as we get it via questionable hack        
         end: bool = false,
-        i: usize = undefined,
         allocator: *std.mem.Allocator = undefined,  // allocator in use for this pipe      
         pipeAddr:usize = 0,                         // Use Make.getPT() and PTIdx to get a pointer to the parent pipe
         PTIdx:usize = undefined,
@@ -409,7 +411,8 @@ pub fn _Stage(comptime Make:*Z, list: anytype) type {
         }
 
         pub fn severOutput(self: *StageType) !void {
-            if (self.outC) |_| {
+            if (self.outC) |c| {
+                self.fwdC = c;
                 self.outC = null;
                 self.state = .sever;
             } else {
@@ -419,7 +422,8 @@ pub fn _Stage(comptime Make:*Z, list: anytype) type {
         }
 
         pub fn severInput(self: *StageType) !void {
-            if (self.inC) |_| {
+            if (self.inC) |c| {
+                self.bwdC = c;
                 self.inC = null;
                 self.state = .sever;
             } else {
@@ -449,7 +453,7 @@ pub fn _Stage(comptime Make:*Z, list: anytype) type {
                 if (self.inC) |c| {         
                     if (c.in == .data) {
                         return c.sin;
-                    }
+                    } 
                 }                
             }
             self.err = error.noInStream;
@@ -460,16 +464,24 @@ pub fn _Stage(comptime Make:*Z, list: anytype) type {
             if (debugCmd) std.debug.print("end: {s}\n",.{self.name});
             for (self.n) |*c| {
                 if (c.dst == self) {
-                    if (self.inC == c)
-                        c.dst.bwdC = c;
-                    self.inC = null;
+                    if (c.in == .data) {
+                        c.in = .sever;
+                    }
+                    if (self.inC == c) {
+                        c.src.fwdC = c;
+                        self.inC = null;
+                    }
                 }
                 if (c.src == self) {
-                    if (self.outC == c)
-                        c.src.fwdC = c;
-                    self.outC = null;
+                    if (c.in == .ok) {
+                        c.in = .sever;
+                    }
+                    if (self.outC == c) {
+                        c.dst.bwdC = c;
+                        self.outC = null;
+                    }
                 }
-                self.state = .sever;
+                self.state = .eos;
             }
             const PT = Make.getPT();
             inline for (PT) | T, i | {
@@ -933,8 +945,6 @@ fn _Mint(comptime Make:*Z, pp:anytype, pN:usize) type {
                 self.severed = 0;
                 self.rc = error.ok;
                 
-                
-                
                 // set starting input/output streams to lowest connected streams (usually 0 - but NOT always)
                 for (nodes) |*n| {
                 
@@ -968,54 +978,37 @@ fn _Mint(comptime Make:*Z, pp:anytype, pN:usize) type {
                 self.severed = 0;
             }
             
-            var state: u32 = 9;
-            var loop: u32 = 0;       
-            
-            const cList = std.ArrayList(*Conn);
+            const cList = std.ArrayList(*Conn);     // type for dispatch lists
 
             var fwdList = cList.init(allocator);
-            defer fwdList.deinit();
+            //defer fwdList.deinit();                 // using arena
             var bwdList = cList.init(allocator);
-            defer bwdList.deinit();
+            //defer bwdList.deinit();                 // using arena
             
             var list:*cList = &fwdList;
-            var runState:usize = 0;
+            var count:usize = 0;
             
-            running: while (self.severed < nodes.len) {
+            running: while (self.severed < nodes.len or bwdList.items.len >0) {
+            
                 var temp: isize = 90909090;    
-                
-                runState = 0;
+                count += 1;
                 
                 if (fwdList.items.len > 0) {
                     list = &fwdList;
                     //std.debug.print(">",.{});
                 } else {
-                    runState = 1;
                     if (bwdList.items.len > 0) {
                         list = &bwdList;
                         //std.debug.print("<",.{});
-                    } else
-                        runState = 2;
+                    } 
                 }
 
-                //std.debug.print("({})",.{fwdList.items.len});
-                if (runState<2) while (list.items.len>0) {
+                while (list.items.len>0) {
                     
                     const c = list.swapRemove(list.items.len-1);                    
                 
                     // dispatch a pending peekTo or readTo
                     if (c == c.dst.inC and (c.dst.state == .peekTo or c.dst.state == .readTo) and c.in != .ok and c.dst.commit == self.commit) {
-                        // std.debug.print("p",.{});
-                        if (debugLoop) {
-                            if (state == 2)
-                                loop += 1
-                            else {
-                                state = 2;
-                                loop = 0;
-                            }
-                        }
-                        if (debugDisp) std.log.info("pre p dst.state {} {}_{s} sin {} in {} {}\n\n", .{ c.dst.state, c.dst.i, c.dst.name, c.sin, c.in, c.data });
-                        //_ = list.swapRemove(i);
                         resume c.dst.frame;
                         if (c.dst.fwdC) |n| {
                             try fwdList.append(n);
@@ -1027,21 +1020,10 @@ fn _Mint(comptime Make:*Z, pp:anytype, pN:usize) type {
                         }
                         continue :running;
                     }
-
+                    
                     // dispatch a pending anyinput
-                    if (c.dst.state == .anyinput and c.in != .ok and c.in != .sever and c.dst.commit == self.commit) {
-                        //std.debug.print("a",.{});
-                        if (debugLoop) {
-                            if (state == 3)
-                                loop += 1
-                            else {
-                                state = 3;
-                                loop = 0;
-                            }
-                        }
+                    if (c.dst.state == .anyinput and c.in == .data and c.dst.commit == self.commit) {
                         c.dst.inC = c;
-                        if (debugDisp) std.log.info("pre a dst.state {} {}_{s} sin {} \n\n", .{ c.dst.state, c.dst.i, c.dst.name, c.sin });
-                        //_ = list.swapRemove(i);
                         resume c.dst.frame;
                         if (c.dst.fwdC) |n| {
                             try fwdList.append(n);
@@ -1053,20 +1035,9 @@ fn _Mint(comptime Make:*Z, pp:anytype, pN:usize) type {
                         }
                         continue :running;
                     }
-                   
+
                     // dispatch a pending output
                     if (c == c.src.outC and c.src.state == .output and c.in != .data and c.src.commit == self.commit) {
-                        //std.debug.print("o",.{});
-                        if (debugLoop) {
-                            if (state == 1)
-                                loop += 1
-                            else {
-                                state = 1;
-                                loop = 0;
-                            }
-                        }
-                        if (debugDisp) std.log.info("pre o src.state {} {}_{s} sout {} in {} {}\n\n", .{ c.src.state, c.src.i, c.src.name, c.sout, c.in, c.data });
-                        //_ = list.swapRemove(i);
                         resume c.src.frame;
                         if (c.src.fwdC) |n| {
                             try fwdList.append(n);
@@ -1080,165 +1051,71 @@ fn _Mint(comptime Make:*Z, pp:anytype, pN:usize) type {
                     } 
                     
                     // compete a sever after any data in the node is consumed
-                    //if ((c.src.state == .sever and c.src.outC == null and c.in == .ok) or 
-                    //    (c.dst.state == .sever and c.dst.inC == null and c.in == .ok)
-                    if ((c.src.state == .sever and c.in == .ok) or 
-                        (c.dst.state == .sever and c.in == .ok)
-                       ) {
-                        // std.debug.print("v",.{});
-                        if (debugDisp) std.log.info("pre sever {} {}_{s} sin {} \n\n", .{ c.dst.state, c.dst.i, c.dst.name, c.sin });
-                        if (c.in != .sever)
-                            try fwdList.append(c);
-                        c.in = .sever;
+                    if ((c.in == .sever or c.in == .ok) and (c.src.state == .sever or c.src.state == .eos or c.dst.state == .sever or c.dst.state == .eos)) {
+                        c.in = .severed;
+                        if (c.dst.state == .anyinput and c.dst.countInstreams() == 0) { // wakeup anyinput if required
+                            resume c.dst.frame;                            
+                            std.debug.assert(c.dst.state != .anyinput);
+                        }
+                        if (c.dst.state == .peekTo) {
+                            resume c.dst.frame;
+                            std.debug.assert(c.dst.state != .peekTo);
+                        }
+                        if (c.dst.fwdC) |n| {
+                            try fwdList.append(n);
+                            c.dst.fwdC = null;
+                        } 
+                        if (c.dst.bwdC) |n| {
+                            try bwdList.append(n);
+                            c.dst.bwdC = null;
+                        }
                         self.severed += 1;
                         continue :running;
-                    
                     }
                     
-                    // special server logic for selectAnyInput
-                    if (c.dst.state == .anyinput and c.src.state == .sever) {
-                        if (c.dst.countInstreams() == 0) {
-                            //std.debug.print("r",.{});
-                            c.in = .sever;
-                            resume c.dst.frame;
-                            self.severed += 1;
-                            if (c.dst.fwdC) |n| {
-                                try fwdList.append(n);
-                                c.dst.fwdC = null;
-                            } 
-                            if (c.dst.bwdC) |n| {
-                                try fwdList.append(n);  // yes fwd list here
-                                c.dst.bwdC = null;
-                            }
-                            continue :running;
-                        }
-                    }                                                            
-                };
-                
-                // if (runState < 2)
-                //     std.debug.print("~",.{});
-            
-                runState += 1;
+                }
                                     
-                if (runState < 2 or fwdList.items.len>0)
+                if (fwdList.items.len>0 or bwdList.items.len>0)
                     continue :running;
 
                 // std.debug.print(":",.{});
                 
-                var i = nodes.len;
-                if (loop<10) while (i>0) { // (nodes) |*c| {
-                    i -= 1;
-                    var c = &nodes[i];
+                // var i = nodes.len;
+                // if (loop<10) while (i>0) { // (nodes) |*c| {
+                //     i -= 1;
+                //     var c = &nodes[i];
                     
-                //if (loop<10) for (nodes) |*c| {
+                for (nodes) |*c| {
                     
                     // std.debug.print(":",.{});
                 
                     // dispatch a pending peekTo or readTo
                     if (c == c.dst.inC and (c.dst.state == .peekTo or c.dst.state == .readTo) and c.in != .ok and c.dst.commit == self.commit) {
                         //std.debug.print("{c}",.{@tagName(c.dst.state)[0]});
-                        if (debugLoop) {
-                            if (state == 2)
-                                loop += 1
-                            else {
-                                state = 2;
-                                loop = 0;
-                            }
-                        }
-                        if (debugDisp) std.log.info("pre p dst.state {} {}_{s} sin {} in {} {}\n\n", .{ c.dst.state, c.dst.i, c.dst.name, c.sin, c.in, c.data });
-                        resume c.dst.frame;
-                        if (c.dst.fwdC) |n| {
-                            try fwdList.append(n);
-                            c.dst.fwdC = null;
-                        }
-                        if (c.dst.bwdC) |n| {
-                            try bwdList.append(n);
-                            c.dst.bwdC = null;
-                        }
+                        try bwdList.append(c);
                         continue :running;
                     }
-
-                 //   // dispatch a pending anyinput
-                 //   if (c.dst.state == .anyinput and c.in != .ok and c.in != .sever and c.dst.commit == self.commit) {
-                 //   //if (c.dst.state == .anyinput and c.in != .ok and c.dst.commit == self.commit) {
-                 //       std.debug.print("a",.{});
-                 //       if (debugLoop) {
-                 //           if (state == 3)
-                 //               loop += 1
-                 //           else {
-                 //               state = 3;
-                 //               loop = 0;
-                 //           }
-                 //       }
-                 //       c.dst.inC = c;
-                 //       if (debugDisp) std.log.info("pre a dst.state {} {}_{s} sin {} \n\n", .{ c.dst.state, c.dst.i, c.dst.name, c.sin });
-                 //       resume c.dst.frame;
-                 //       if (c.dst.fwdC) |n| {
-                 //           try fwdList.append(n);
-                 //           c.dst.fwdC = null;
-                 //       }
-                 //       if (c.dst.bwdC) |n| {
-                 //           try bwdList.append(n);
-                 //           c.dst.bwdC = null;
-                 //       }
-                 //       continue :running;
-                 //   }
-                 //  
-                 //   // dispatch a pending output
-                 //   if (c == c.src.outC and c.src.state == .output and c.in != .data and c.src.commit == self.commit) {
-                 //       std.debug.print("o",.{});
-                 //       if (debugLoop) {
-                 //           if (state == 1)
-                 //               loop += 1
-                 //           else {
-                 //               state = 1;
-                 //               loop = 0;
-                 //           }
-                 //       }
-                 //       if (debugDisp) std.log.info("pre o src.state {} {}_{s} sout {} in {} {}\n\n", .{ c.src.state, c.src.i, c.src.name, c.sout, c.in, c.data });
-                 //       resume c.src.frame;
-                 //       if (c.src.fwdC) |n| {
-                 //           try fwdList.append(n);
-                 //           c.src.fwdC = null;
-                 //       }
-                 //       if (c.src.bwdC) |n| {
-                 //           try bwdList.append(n);
-                 //           c.src.bwdC = null;
-                 //       }
-                 //       continue :running;
-                 //   } 
+                  
+                     // dispatch a pending anyinput
+                    if (c.dst.state == .anyinput and c.in == .data and c.dst.commit == self.commit) {
+                        try bwdList.append(c);
+                        continue :running;
+                    }
+                    
+                  
+                    // dispatch a pending output
+                    if (c == c.src.outC and c.src.state == .output and c.in != .data and c.src.commit == self.commit) {
+                        try fwdList.append(c);
+                        continue :running;
+                    } 
                    
                     // compete a sever after any data in the node is consumed
-                    if ((c.src.state == .sever and c.in == .ok) or 
-                        (c.dst.state == .sever and c.in == .ok)
-                       ) {
-                        //std.debug.print("v",.{});
-                        if (debugDisp) std.log.info("pre sever {} {}_{s} sin {} \n\n", .{ c.dst.state, c.dst.i, c.dst.name, c.sin });
-                        c.in = .sever;
-                        self.severed += 1;
+                    if ((c.in == .sever or c.in == .ok) and (c.src.state == .sever or c.src.state == .eos or c.dst.state == .sever or c.dst.state == .eos)) {
+                        try fwdList.append(c);
                         continue :running;
-                
                     }
                     
-                    // special server logic for selectAnyInput
-                    if (c.dst.state == .anyinput and c.src.state == .sever) {
-                        if (c.dst.countInstreams() == 0) {
-                            //std.debug.print("r",.{});
-                            c.in = .sever;
-                            resume c.dst.frame;
-                            self.severed += 1;
-                            if (c.dst.fwdC) |n| {
-                                try fwdList.append(n);
-                                c.dst.fwdC = null;
-                            }
-                            if (c.dst.bwdC) |n| {
-                                try bwdList.append(n);
-                                c.dst.bwdC = null;
-                            }
-                            continue :running;
-                        }
-                    }
-                    
+                   
                     //std.debug.print(".call dst {} {}\n      src {} {} - {} {}\n",.{c.dst.state, c.dst.commit, c.src.state, c.src.commit, self.commit, c.in});
                     if ((c.dst.state == .call or c.src.state == .call) and c.in != .sever ) {
                         const stage = if (c.dst.state == .call) c.dst else c.src;         
@@ -1249,7 +1126,7 @@ fn _Mint(comptime Make:*Z, pp:anytype, pN:usize) type {
                                 stage.fwdC = null;
                             } 
                             if (c.dst.fwdC) |n| {
-                                try fwdList.append(n);
+                                try bwdList.append(n);
                             c.dst.fwdC = null;
                             }
                             continue :running;
@@ -1311,7 +1188,10 @@ fn _Mint(comptime Make:*Z, pp:anytype, pN:usize) type {
                     // track commit levels
                     if (c.dst.commit < temp) temp = c.dst.commit;
                     if (c.src.commit < temp) temp = c.src.commit;
-                };
+                }
+                
+                if (fwdList.items.len>0 or bwdList.items.len>0)
+                    continue :running;
 
                 // is it time to commit to a higher level?
                 if (debugDisp) std.debug.print("commit {} {}\n", .{ self.commit, temp });
@@ -1322,24 +1202,19 @@ fn _Mint(comptime Make:*Z, pp:anytype, pN:usize) type {
                     continue :running;
                 }
                 
-                // when/if we use os threads in stages we will need to wait for them here.
-
-                if (debugLoop) if (loop >= 10) {
-                    std.debug.print("looping\n", .{});
-                    for (nodes) |*c| {
-                        std.debug.print("src {}_{s} {} {} {} {} dst {}_{s} {} {} {} {} in {} {}\n", .{ c.src.i, c.src.name, c.sout, c.src.state, c.src.err,  c.src.commit, c.dst.i, c.dst.name, c.sin, c.dst.state, c.dst.err, c.dst.commit, c.in,  c.data.type });
-                    }
+                if (self.severed == nodes.len)
                     break :running;
-                };
+                
+                // when/if we use os threads in stages we will need to wait for them here.
                 
                 // detect stalls
                 for (p) |*s| {
-                    if (debugDisp) std.log.info("{s} {}", .{ s.name, s.rc });
+                    if (debugDisp) std.log.info("{s} {}", .{ s.name, s.rc});
                     if (s.err != error.ok) {
                         if (s.err == error.endOfStream or s.commit == -90909090) {
                             continue;
                         } else if (self.severed < nodes.len) {
-                            std.debug.print("\nStalled! {s} rc {}\n", .{ s.name, s.err });
+                            std.debug.print("\nStalled! {s} rc {} {}/{}\n", .{ s.name, s.err,  nodes.len, self.severed});
                             for (nodes) |*c| {
                                 std.debug.print("src {}_{s} {} {} {} dst {}_{s} {} {} {} in {} {}\n", .{ c.src.i, c.src.name, c.sout, c.src.state, c.src.commit, c.dst.i, c.dst.name, c.sin, c.dst.state, c.dst.commit, c.in,  c.data.type });
                             }
@@ -1351,11 +1226,18 @@ fn _Mint(comptime Make:*Z, pp:anytype, pN:usize) type {
                 }
                 break :running;
             }
-
-            if (debugStart) {
-                std.debug.print("\n{}\n", .{StageType});
-                for (nodes) |*c| {
-                    std.debug.print("src {}_{s} {} {} {} dst {}_{s} {} {} {} in {} {}\n", .{ c.src.i, c.src.name, c.sout, c.src.state, c.src.commit, c.dst.i, c.dst.name, c.sin, c.dst.state, c.dst.commit, c.in, c.data });
+           
+            if (true) {            // safety checking
+                const flag = 
+                    for (nodes) |c| {
+                        if (c.in != .severed or c.src.state != .eos or c.dst.state != .eos) break true;
+                    } else 
+                        false;
+                if (flag) {
+                    std.debug.print(" --  {} {}/{} {} {}\n",.{count, nodes.len, self.severed, fwdList.items.len, bwdList.items.len});
+                    for (nodes) |*c| {
+                        std.debug.print("src {}_{s} {} {} {} dst {}_{s} {} {} {} in {} {}\n", .{ c.src.i, c.src.name, c.sout, c.src.state, c.src.commit, c.dst.i, c.dst.name, c.sin, c.dst.state, c.dst.commit, c.in, c.data.type });
+                    }
                 }
             }
 

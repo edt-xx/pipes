@@ -45,6 +45,7 @@ pub fn Filters(comptime StageType: type, comptime SelectedType: type) type {
                 if (debugStages) std.log.info("div out {}_{s} {*}", .{ self.i, self.name, self.outC });
                 _ = try self.readTo(T);
             }
+            return self.ok();
         }
         
         // send items to selected output stream using the index of the type in the item's typeUnion
@@ -298,9 +299,7 @@ pub fn Filters(comptime StageType: type, comptime SelectedType: type) type {
             while (!done) {
                 if (debugStages) std.log.info("fanin {}_{s} {*} {*}", .{ self.i, self.name, self.inC, self.outC });
                 while (true) {
-                    const tmp = try self.peekTo(S.TU) catch |e| {
-                        if (e == error.endOfStream) break else return e;
-                    };
+                    const tmp = try self.peekTo(S.TU);
                     try self.output(tmp);
                     _ = try self.readTo(S.TU);
                 }
@@ -319,14 +318,13 @@ pub fn Filters(comptime StageType: type, comptime SelectedType: type) type {
             if (debugStart) std.log.info("start {}_{s}", .{ self.i, self.name });
 
             while (true) {
-                _ = self.selectAnyInput() catch |e| {
-                    if (e == error.noInStream) return else return e;
-                };
+                _ = try self.selectAnyInput();
                 if (debugStages) std.log.info("faninany {}_{s} {*} {*}", .{ self.i, self.name, self.inC, self.outC });
                 const tmp = try self.peekTo(S.TU);
                 try self.output(tmp);
                 _ = try self.readTo(S.TU);
             }
+            return self.ok;
         }
 
         pub fn copy(self: *S) callconv(.Async) !void {
